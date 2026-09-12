@@ -119,8 +119,20 @@ class DeviceManager(
 
     def device_list(self) -> list[dict[str, Any]]:
         self._refresh_devices()
-        return [
-            {
+        # ``self.devices`` doubles as a lookup map, so one physical device can be
+        # reachable under more than one key: ``_discover_printer_devices``
+        # registers a discovered network printer under its own identifier *and*
+        # under the ``printer_main`` alias, both pointing at the same Device.
+        # Advertising both made clients -- the POS included -- see a single
+        # printer twice and send every kitchen ticket twice, so report each
+        # identifier once.  The aliases stay in ``self.devices`` for lookup.
+        seen: set[str] = set()
+        entries: list[dict[str, Any]] = []
+        for d in self.devices.values():
+            if d.identifier in seen:
+                continue
+            seen.add(d.identifier)
+            entries.append({
                 # Standard Odoo IoT Box field names (with device_ prefix)
                 "device_identifier": d.identifier,
                 "device_name": d.name,
@@ -137,9 +149,8 @@ class DeviceManager(
                 "manufacturer": d.manufacturer,
                 "status": d.status,
                 "metadata": d.metadata,
-            }
-            for d in self.devices.values()
-        ]
+            })
+        return entries
 
     def external_device_identifier(self, local_identifier: str) -> str:
         local = str(local_identifier or "").strip()

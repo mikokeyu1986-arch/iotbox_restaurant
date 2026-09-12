@@ -266,7 +266,11 @@ class OdooCloudBridge:
         self.last_error = message
         self.last_server_url = ""
         self.last_channel = ""
-        connection = self.config_store.reset_connection(message=message)
+        # An unbind clears the machine configuration too, not just the pairing:
+        # the box is being handed to a new deployment.  The failed-connect paths
+        # in main.py deliberately call reset_connection() instead, which leaves
+        # the local configuration intact.
+        connection = self.config_store.reset_for_unbind(message=message)
         if self._active_ws is not None:
             await self._active_ws.close()
         self.connected = False

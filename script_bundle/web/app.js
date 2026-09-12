@@ -308,15 +308,24 @@ el("backToConnect").addEventListener("click", () => {
 });
 
 el("disconnectServer").addEventListener("click", async () => {
-  const confirmed = window.confirm("Unbind the current Odoo server from this runtime?");
+  const confirmed = window.confirm(
+    "Unbind the current Odoo server from this runtime?\n\n" +
+      "This also clears the printer, scale and VFD configuration so the box is " +
+      "ready for a new deployment. The receipt layouts are kept."
+  );
   if (!confirmed) return;
 
   try {
     await disconnectServer();
     el("tokenUrl").value = "";
     await load();
+    // The unbind cleared the machine configuration, which /api/status does not
+    // carry.  Re-read these panels too, otherwise they keep showing the
+    // pre-unbind values and the next save would write them straight back.
+    await loadScaleConfig();
+    await loadScalePorts();
     updateStepVisibility(false);
-    setFeedback("settingsFeedback", "Current server unbound.", "success");
+    setFeedback("settingsFeedback", "Current server unbound. Configuration cleared.", "success");
     setFeedback("formFeedback", "Runtime is ready for a new token URL.", "success");
   } catch (error) {
     console.error(error);
@@ -480,8 +489,84 @@ function updateReceiptModeUI() {
   el("receiptEditorTitle").textContent = kitchen ? "厨房单可视化编辑器" : "小票可视化编辑器";
   el("receiptBlockHeading").textContent = kitchen ? "厨房单区块" : "小票区块";
   el("receiptPreviewHeading").textContent = kitchen ? "厨房单实时预览" : "顾客小票实时预览";
+  el("kitchenLineSettings").classList.toggle("hidden", !kitchen);
   for (const button of document.querySelectorAll("[data-receipt-mode]")) {
     button.classList.toggle("is-active", button.dataset.receiptMode === receiptTemplateMode);
+  }
+}
+
+// Line types the server offers for per-line sizing, as [{id, label}].  Fetched
+// rather than hardcoded so a new line type in the builder needs no change here.
+let kitchenLineClasses = [];
+const KITCHEN_SIZE_LABELS = { 1: "标准", 2: "中号", 3: "大号" };
+const KITCHEN_BOLD_CHOICES = [["inherit", "保持原样"], ["true", "加粗"], ["false", "不加粗"]];
+
+function updateKitchenLineSetting(kind, lineClass, value) {
+  if (!receiptTemplate) return;
+  const key = kind === "bold" ? "line_bold" : "line_font_sizes";
+  const map = receiptTemplate[key] || (receiptTemplate[key] = {});
+  const next = value === null ? undefined : value;
+  if (map[lineClass] === next) return;
+  rememberReceiptTemplate();
+  // An absent entry means "leave the line's own weight alone", so removing the
+  // key is how the editor expresses 保持原样.
+  if (next === undefined) delete map[lineClass];
+  else map[lineClass] = next;
+  receiptTemplateChanged();
+}
+
+function renderKitchenLineSettings() {
+  const container = el("kitchenLineSettingsRows");
+  if (!container || !receiptTemplate) return;
+  // Only the line types the selected block actually prints, so the panel reads
+  // as "settings for this block" rather than a global list.
+  const wanted = kitchenLineClasses.filter((entry) => entry.block === selectedReceiptBlockId);
+  const key = wanted.map((entry) => entry.id).join("|");
+  if (container.dataset.lineKey !== key) {
+    container.dataset.lineKey = key;
+    clearNode(container);
+    for (const { id, label } of wanted) {
+      const row = document.createElement("label");
+      row.className = "field kitchen-line-row";
+      row.dataset.lineClass = id;
+
+      const name = document.createElement("span");
+      name.textContent = label;
+
+      const size = document.createElement("select");
+      for (const value of Object.keys(KITCHEN_SIZE_LABELS)) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = KITCHEN_SIZE_LABELS[value];
+        size.append(option);
+      }
+      size.addEventListener("change", () => {
+        updateKitchenLineSetting("size", id, Number(size.value) || 1);
+      });
+
+      const bold = document.createElement("select");
+      for (const [value, text] of KITCHEN_BOLD_CHOICES) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = text;
+        bold.append(option);
+      }
+      bold.addEventListener("change", () => {
+        updateKitchenLineSetting("bold", id, bold.value === "inherit" ? null : bold.value === "true");
+      });
+
+      row.append(name, size, bold);
+      container.append(row);
+    }
+  }
+  const sizes = receiptTemplate.line_font_sizes || {};
+  const boldMap = receiptTemplate.line_bold || {};
+  for (const row of container.children) {
+    const id = row.dataset.lineClass;
+    const [size, bold] = row.querySelectorAll("select");
+    size.value = String(sizes[id] || 1);
+    const weight = boldMap[id];
+    bold.value = weight === true ? "true" : weight === false ? "false" : "inherit";
   }
 }
 
@@ -584,7 +669,6 @@ function selectReceiptBlock(blockId) {
     el("receiptBlockSpacing").value = Number(block.spacing_after || 0);
     el("receiptBlockSeparatorAfter").checked = Boolean(block.separator_after);
     el("receiptBlockSeparatorAfterCharacter").value = block.separator_after_character || "-";
-    el("receiptBlockBlankLineAfter").checked = Boolean(block.blank_line_after);
     el("receiptBlockContentField").classList.toggle("hidden", !canOverrideContent);
     const usesProductColumns = ["product_header", "products"].includes(block.id);
     const headerBlock = receiptProductHeaderBlock() || block;
@@ -593,12 +677,14 @@ function selectReceiptBlock(blockId) {
     el("receiptCustomTextField").classList.toggle("hidden", kind !== "text");
     el("receiptSeparatorField").classList.toggle("hidden", kind !== "separator");
     el("receiptSpacerField").classList.toggle("hidden", kind !== "spacer");
-    el("receiptDoubleSizeField").classList.toggle("hidden", kind !== "text" && !["table", "tracking"].includes(block.id));
-    const receiptFontTarget = receiptTemplateMode === "receipt" && ["tracking", "products"].includes(block.id);
+    // The size dropdown is the only size control for built-in lines.  The old
+    // "取餐号双倍字号" checkbox is gone: it wrote a field the renderer never
+    // honoured for the table, and the dropdown covers the same ground.
+    const receiptFontTarget =
+      receiptTemplateMode === "receipt" && ["tracking", "table", "products"].includes(block.id);
     el("receiptFontSizeField").classList.toggle("hidden", !receiptFontTarget);
-    el("kitchenDetailFontFields").classList.toggle("hidden", receiptTemplateMode !== "kitchen" || block.id !== "products");
-    el("receiptDoubleSizeField").querySelector("span").textContent =
-      ["table", "tracking"].includes(block.id) ? "取餐号双倍字号" : "双倍字号";
+    // A custom text block has no dropdown, so it keeps the double-size toggle.
+    el("receiptDoubleSizeField").classList.toggle("hidden", kind !== "text");
     el("receiptDeleteBlock").classList.toggle("hidden", kind === "builtin");
     el("receiptBlockContent").value = block.id === "portal_prompt"
       ? "{{ portal_title }}"
@@ -614,20 +700,12 @@ function selectReceiptBlock(blockId) {
     el("receiptCustomText").value = block.text || "";
     el("receiptSeparatorCharacter").value = block.character || "-";
     el("receiptSpacerLines").value = Number(block.lines || 1);
-    el("receiptDoubleSize").checked = block.id === "tracking"
-      ? Boolean(block.double_size)
-      : block.id === "table"
-      ? Boolean(block.tracking_double_size)
-      : Boolean(block.double_size);
+    el("receiptDoubleSize").checked = Boolean(block.double_size);
     const productDetailFont = receiptTemplateMode === "receipt" && block.id === "products";
     el("receiptFontSizeField").querySelector("span").textContent = productDetailFont ? "商品明细字号" : "字号大小";
-    el("receiptFontSize").querySelector('option[value="3"]').disabled = productDetailFont;
-    el("receiptFontSize").value = String(Math.min(productDetailFont ? 2 : 3, block.font_size || 1));
-    el("kitchenProductFontSize").value = String(block.product_font_size || 1);
-    el("kitchenAttributeFontSize").value = String(block.attribute_font_size || 1);
-    el("kitchenNoteFontSize").value = String(block.note_font_size || 1);
-    el("kitchenOrderNoteFontSize").value = String(block.order_note_font_size || 1);
+    el("receiptFontSize").value = String(Math.min(5, block.font_size || 1));
   }
+  renderKitchenLineSettings();
   renderReceiptBlockList();
 }
 
@@ -636,6 +714,7 @@ function receiptTemplateChanged() {
   el("receiptUndo").disabled = receiptHistory.length === 0;
   renderReceiptBlockList();
   if (selectedReceiptBlockId) selectReceiptBlock(selectedReceiptBlockId);
+  renderKitchenLineSettings();
   scheduleReceiptPreview();
 }
 
@@ -812,11 +891,13 @@ async function loadReceiptEditor() {
     updateReceiptModeUI();
     const result = await getJSON(receiptTemplateEndpoint());
     receiptTemplate = result.template;
+    kitchenLineClasses = result.line_classes || kitchenLineClasses;
     receiptHistory = [];
     el("receiptTemplateName").value = receiptTemplate.name;
     el("receiptPaperWidth").value = String(receiptTemplate.paper_width);
     selectedReceiptBlockId = receiptTemplate.blocks?.[0]?.id || null;
     selectReceiptBlock(selectedReceiptBlockId);
+    renderKitchenLineSettings();
     setReceiptDirty(false);
     el("receiptUndo").disabled = true;
     await previewReceiptTemplate();
@@ -855,9 +936,6 @@ el("receiptBlockSeparatorAfter").addEventListener("change", (event) => {
 });
 el("receiptBlockSeparatorAfterCharacter").addEventListener("change", (event) => {
   updateSelectedReceiptBlock("separator_after_character", event.target.value);
-});
-el("receiptBlockBlankLineAfter").addEventListener("change", (event) => {
-  updateSelectedReceiptBlock("blank_line_after", Boolean(event.target.checked));
 });
 el("receiptBlockContent").addEventListener("input", (event) => {
   const block = receiptBlockById(selectedReceiptBlockId);
@@ -933,26 +1011,11 @@ el("receiptSpacerLines").addEventListener("change", (event) => {
   updateSelectedReceiptBlock("lines", Math.max(1, Math.min(6, Number(event.target.value) || 1)));
 });
 el("receiptDoubleSize").addEventListener("change", (event) => {
-  const block = receiptBlockById(selectedReceiptBlockId);
-  updateSelectedReceiptBlock(
-    block?.id === "table" ? "tracking_double_size" : "double_size",
-    event.target.checked,
-  );
+  updateSelectedReceiptBlock("double_size", event.target.checked);
 });
 el("receiptFontSize").addEventListener("change", (event) => {
-  const maximum = selectedReceiptBlockId === "products" ? 2 : 3;
-  updateSelectedReceiptBlock("font_size", Math.max(1, Math.min(maximum, Number(event.target.value) || 1)));
+  updateSelectedReceiptBlock("font_size", Math.max(1, Math.min(5, Number(event.target.value) || 1)));
 });
-for (const [id, field] of [
-  ["kitchenProductFontSize", "product_font_size"],
-  ["kitchenAttributeFontSize", "attribute_font_size"],
-  ["kitchenNoteFontSize", "note_font_size"],
-  ["kitchenOrderNoteFontSize", "order_note_font_size"],
-]) {
-  el(id).addEventListener("change", (event) => {
-    updateSelectedReceiptBlock(field, Math.max(1, Math.min(3, Number(event.target.value) || 1)));
-  });
-}
 el("receiptAddText").addEventListener("click", () => addReceiptBlock("text"));
 el("receiptAddSeparator").addEventListener("click", () => addReceiptBlock("separator"));
 el("receiptAddSpacer").addEventListener("click", () => addReceiptBlock("spacer"));

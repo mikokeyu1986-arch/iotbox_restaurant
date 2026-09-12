@@ -199,7 +199,12 @@ class ReceiptTemplateTests(unittest.TestCase):
         self.assertEqual(header["text"].index("Producto"), 8)
         self.assertGreaterEqual(header["text"].index("Importe"), 40)
 
-    def test_product_detail_font_size_two_reflows_to_double_width(self):
+    def test_product_detail_font_size_two_scales_height_only(self):
+        """A larger size must not cost characters per line.
+
+        The row keeps all 48 columns and grows taller; multiplying the width
+        would reflow it to 24 columns and wrap product names much sooner.
+        """
         template = default_template()
         products = next(block for block in template["blocks"] if block["id"] == "products")
         products["font_size"] = 2
@@ -211,9 +216,10 @@ class ReceiptTemplateTests(unittest.TestCase):
         ]
 
         self.assertTrue(product_rows)
-        self.assertTrue(all(_cell_width(line["text"]) == 24 for line in product_rows))
-        self.assertTrue(all(line["width_multiplier"] == 2 for line in product_rows))
+        self.assertTrue(all(_cell_width(line["text"]) == 48 for line in product_rows))
+        self.assertTrue(all(line["width_multiplier"] == 1 for line in product_rows))
         self.assertTrue(all(line["height_multiplier"] == 2 for line in product_rows))
+        self.assertTrue(all(line["double_width"] is False for line in product_rows))
         self.assertTrue(any("17,00 €" in line["text"] for line in product_rows))
 
     def test_unused_columns_create_a_safe_gutter_before_amount(self):

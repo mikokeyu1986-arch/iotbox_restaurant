@@ -10,7 +10,12 @@ from .product_options import format_option
 
 class TextLayoutMixin:
     def _render_escpos_lines(self, line: dict[str, Any], width: int) -> list[str]:
-        effective_width = max(16, width // 2) if line.get("double_width") else width
+        # The wrap width has to follow the real glyph width: a 3x-wide glyph fits
+        # a third of the columns, and wrapping at width // 2 would overflow the
+        # paper.  _line_size_multipliers reads width_multiplier when present and
+        # falls back to the double_width boolean.
+        width_multiplier, _height_multiplier = self._line_size_multipliers(line)
+        effective_width = max(8, width // width_multiplier) if width_multiplier > 1 else width
         if line.get("type") == "spacer":
             return [""]
         classes = [str(cls) for cls in line.get("classes", [])] if isinstance(line.get("classes"), list) else []

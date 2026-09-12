@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import sys
 from pathlib import Path
@@ -16,6 +17,45 @@ os.environ.setdefault("IOT_CONFIG_PATH", str(INSTALL_DIR / "runtime_config.json"
 os.environ.setdefault("IOT_CERTS_DIR", str(INSTALL_DIR / "certs"))
 os.environ.setdefault("IOT_SSL_VERIFY", "0")
 os.environ.setdefault("IOT_PORT", "8398")
+
+LOG_DIR = INSTALL_DIR / "logs"
+
+
+def _configure_logging() -> None:
+    """Install the root logging handler before the app is imported.
+
+    uvicorn is started with ``log_config=None``, so nothing configures logging
+    and every INFO line -- the ``dev_log`` diagnostics included -- is dropped,
+    which leaves a runtime that prints nothing impossible to diagnose from the
+    machine.  Write a rotating file next to the runtime as well as the console.
+    """
+    if logging.getLogger().handlers:
+        return
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    handlers: list[logging.Handler] = []
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            LOG_DIR / "https-runtime.log",
+            maxBytes=5 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        handlers.append(file_handler)
+    except OSError:
+        pass
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    handlers.append(stream_handler)
+    # IOT_LOG_LEVEL=DEBUG surfaces the diagnostics that are otherwise dropped,
+    # such as a cloud message addressed to a different IoT identifier.
+    level_name = (os.getenv("IOT_LOG_LEVEL") or "INFO").strip().upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(level=level, handlers=handlers)
+
+
+_configure_logging()
 
 from app.certificate_manager import ensure_runtime_tls_assets  # noqa: E402
 from app.main import IOT_IP, app, certificate_manager, config_store  # noqa: E402

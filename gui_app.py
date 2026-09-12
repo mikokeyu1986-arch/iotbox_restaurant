@@ -879,11 +879,13 @@ class SettingsWindow(tk.Toplevel):
                 except Exception as exc:
                     errors.append(f"{local_url}: {exc}")
             # 无论服务端接口是否可达，本机配置一律清空，保证 GUI 状态与磁盘一致。
-            self.config_store.reset_connection()
+            self.config_store.reset_for_unbind()
             self._refresh_bound_status()
+            # 电子秤 / VFD 分页也要跟随清空，否则仍显示旧值，下次保存会把它们写回去。
+            self._load_config()
             self.token_url_var.set("")
             if service_ok:
-                self._append_log("已解除服务器绑定，连接配置已自动清空")
+                self._append_log("已解除服务器绑定，连接与本机配置已自动清空")
             else:
                 self._append_log("已解除服务器绑定（配置已本地清空），但未能通知本地服务: " + " | ".join(errors))
         except Exception as e:

@@ -6,7 +6,7 @@ from pathlib import Path
 import shutil
 import threading
 from time import monotonic
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import parse_qs, urlparse
 import uuid
 
@@ -21,6 +21,12 @@ _LEGACY_PACKAGED_IOT_IDENTIFIERS = {
     "custom-iot-box-a9f549a11170",
     "custom-iot-box-81e830c8e082",
 }
+
+# Unbinding hands the box to a new deployment, so the previous customer's
+# machine configuration has to go -- but the box's own identity must survive.
+# A re-pairing to the same Odoo has to stay the same IOTBOX; regenerating the
+# identifier would register a duplicate device there instead.
+_UNBIND_PROTECTED_KEYS: tuple[str, ...] = ("iot_identifier",)
 
 
 class ConfigStore:
@@ -172,6 +178,39 @@ class ConfigStore:
             self._data["server_connection"] = connection
             self._save()
             return dict(connection)
+
+    def reset_local_config(self, *, keep: Iterable[str] = _UNBIND_PROTECTED_KEYS) -> dict[str, Any]:
+        """Reset every local setting to its default.
+
+        Only the explicit unbind path may call this.  It discards the printers,
+        scale and VFD the previous deployment was configured for, so calling it
+        from a failed *pairing* would destroy a working installation -- see
+        ``reset_for_unbind`` for the full unbind and ``reset_connection`` for the
+        connection-only reset that the failure paths use.
+        """
+        with self._lock:
+            current = self._data.setdefault("local_config", {})
+            preserved = {key: current[key] for key in keep if key in current}
+            reset = self._default_local_config()
+            reset.update(preserved)
+            # Never reset onto the plain_http default: the shipped runtime is
+            # HTTPS-only, and the certificates clients pin are issued for it.
+            # run_https.py re-asserts both on every start; doing it here too
+            # keeps the store sane for anything that reads it in between.
+            reset["ssl_engine"] = "secure_https"
+            reset["service_protocol"] = "https"
+            self._data["local_config"] = reset
+            self._save()
+            return dict(reset)
+
+    def reset_for_unbind(self, *, message: str = "") -> dict[str, Any]:
+        """Unbind: drop the pairing *and* the machine configuration it served.
+
+        Deliberately separate from ``reset_connection``, which the failed-connect
+        paths also call and which must leave the local configuration alone.
+        """
+        self.reset_local_config()
+        return self.reset_connection(message=message)
 
     def set_sync_status(self, ok: bool, message: str) -> None:
         with self._lock:

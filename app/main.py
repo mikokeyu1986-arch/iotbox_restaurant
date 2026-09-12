@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import ipaddress
 import json
 import logging
 import os
 import socket
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,7 @@ from .printing.printer_language import normalize_language
 from .receipt_builder import build_receipt_lines
 from .receipt_builder import build_kitchen_ticket_lines
 from .kitchen_template_store import (
+    LINE_CLASSES,
     load_kitchen_template,
     reset_kitchen_template,
     save_kitchen_template,
@@ -103,6 +106,52 @@ def _set_customer_display_state(action_data: dict[str, Any]) -> None:
         payload = action_data.get("data", action_data)
     _customer_display_state["revision"] = int(_customer_display_state["revision"]) + 1
     _customer_display_state["payload"] = payload if isinstance(payload, dict) else {"text": str(payload)}
+
+
+def _clear_customer_display_state() -> None:
+    """Drop the last order so it cannot outlive the pairing that sent it.
+
+    The display is a local webview that reconnects to this state, and an empty
+    payload makes it fall back to its welcome screen.  The revision is bumped
+    rather than zeroed so every connected screen notices the change.
+    """
+    _customer_display_state["revision"] = int(_customer_display_state["revision"]) + 1
+    _customer_display_state["payload"] = {}
+
+
+# The Movi app has been observed POSTing a byte-identical kitchen print twice
+# roughly 100 ms apart, and only *after* the first request had already been
+# acknowledged, so both tickets were printed.  Remember what was just accepted
+# and drop an identical repeat.  Set the window to 0 to switch the guard off.
+_KITCHEN_PRINT_DEDUPE_SECONDS = max(0.0, float(os.getenv("IOT_KITCHEN_PRINT_DEDUPE_SECONDS", "3")))
+_recent_kitchen_prints: dict[str, float] = {}
+
+
+def _is_duplicate_kitchen_print(body: dict[str, Any]) -> bool:
+    """Record this kitchen print and report whether it repeats a recent one.
+
+    A receipt explicitly flagged as a reprint is never suppressed: that flag is
+    how the caller asks for a deliberate second copy.
+    """
+    if _KITCHEN_PRINT_DEDUPE_SECONDS <= 0:
+        return False
+    receipts = body.get("receipts") or []
+    if any(isinstance(receipt, dict) and receipt.get("reprint") for receipt in receipts):
+        return False
+    try:
+        digest = hashlib.sha256(
+            json.dumps(body, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+        ).hexdigest()
+    except (TypeError, ValueError):
+        return False
+    now = time.monotonic()
+    for seen_digest, seen_at in list(_recent_kitchen_prints.items()):
+        if now - seen_at > _KITCHEN_PRINT_DEDUPE_SECONDS:
+            del _recent_kitchen_prints[seen_digest]
+    if digest in _recent_kitchen_prints:
+        return True
+    _recent_kitchen_prints[digest] = now
+    return False
 
 
 def _suppress_windows_connection_reset(loop: asyncio.AbstractEventLoop) -> None:
@@ -1263,6 +1312,25 @@ async def printer_iot_kitchen_print(request: Request) -> dict[str, Any]:
             content={"status": "error", "message": "Missing or empty receipts array"},
         )
 
+    if _is_duplicate_kitchen_print(body):
+        _logger.info(
+            "Duplicate kitchen print ignored device=%s receipts=%s window_s=%s",
+            device_identifier,
+            len(receipts),
+            _KITCHEN_PRINT_DEDUPE_SECONDS,
+        )
+        dev_log(
+            "printer_iot_printer_duplicate",
+            device_identifier=device_identifier,
+            receipt_count=len(receipts),
+        )
+        # Report success: the ticket is already on its way to the printer, and a
+        # failure response would only invite the caller to retry a third time.
+        return {
+            "status": "ok",
+            "results": [{"index": i, "ok": True, "duplicate": True} for i in range(len(receipts))],
+        }
+
     session_id = str(
         config_store.get_local_config().get("printer_identifier")
         or f"printer-iot-{int(asyncio.get_running_loop().time() * 1000)}"
@@ -1443,9 +1511,26 @@ async def api_connect(payload: dict[str, Any]) -> dict[str, Any]:
 
 @app.post("/api/disconnect")
 async def api_disconnect() -> dict[str, Any]:
+    """Unbind: clear the pairing *and* every configuration record it set up.
+
+    ``cloud_bridge.disconnect`` performs the local-configuration reset itself,
+    so the GUI's own unbind path (which calls this endpoint) behaves the same.
+    """
     connection = await cloud_bridge.disconnect(message="Disconnected from Odoo. Ready to pair a new server.")
-    dev_log("api_disconnect", message=connection.get("last_sync_message", ""))
-    return {"status": "success", "server_connection": connection}
+    # The server certificate is bound to this box's address and is re-issued on
+    # the next start; the signing CA is kept because clients pin it.
+    removed_certificates = certificate_manager.clear_server_certificate()
+    _clear_customer_display_state()
+    dev_log(
+        "api_disconnect",
+        message=connection.get("last_sync_message", ""),
+        removed_certificates=removed_certificates,
+    )
+    return {
+        "status": "success",
+        "server_connection": connection,
+        "local_config": config_store.get_local_config(),
+    }
 
 
 @app.post("/api/settings")
@@ -1595,7 +1680,17 @@ async def api_preview_receipt_template(payload: dict[str, Any]) -> dict[str, Any
 
 @app.get("/api/kitchen-template")
 async def api_kitchen_template() -> dict[str, Any]:
-    return {"status": "success", "template": load_kitchen_template()}
+    # ``line_classes`` lets the editor build one row per line type without
+    # duplicating the list in JavaScript, so adding a line type to the builder
+    # surfaces a control for it automatically.
+    return {
+        "status": "success",
+        "template": load_kitchen_template(),
+        "line_classes": [
+            {"id": name, "label": label, "block": block_id}
+            for name, label, block_id in LINE_CLASSES
+        ],
+    }
 
 
 @app.put("/api/kitchen-template")

@@ -1002,6 +1002,7 @@ def build_kitchen_ticket_lines(
         "text": order_type,
         "align": "center", "bold": True,
         "double_width": True, "double_height": True,
+        "classes": ["kitchen-order-type"],
     })
     mark_block(block_start, "order_type")
 
@@ -1023,6 +1024,7 @@ def build_kitchen_ticket_lines(
         "text": kitchen_title,
         "align": "center", "bold": True,
         "double_width": True, "double_height": True,
+        "classes": ["kitchen-status"],
     })
     mark_block(block_start, "status")
 
@@ -1217,8 +1219,23 @@ def build_kitchen_ticket_lines(
                     "name": "{{ course_groups[].items[].full_product_name }}", "total": "",
                     "double_width": True, "classes": ["kitchen-product-line"],
                 },
-                {"text": "    + {{ course_groups[].items[].orderDisplayProductName.attributeString }}", "align": "left"},
-                {"text": "NOTA: {{ course_groups[].items[].customer_note }}", "align": "left", "bold": True},
+                # These carry the same classes as the real ticket
+                # (``receipt_builder.py:1112``/``:1127``/``:1157``) so the
+                # editor's per-line-type size and bold are visible in the
+                # preview.  Without the classes the preview cannot show them.
+                {
+                    "text": "    + {{ course_groups[].items[].orderDisplayProductName.attributeString }}",
+                    "align": "left", "classes": ["kitchen-note", "kitchen-attribute"],
+                },
+                {
+                    "text": "  NOTA: {{ course_groups[].items[].customer_note }}",
+                    "align": "left", "bold": True,
+                    "classes": ["kitchen-note", "kitchen-product-note"],
+                },
+                {
+                    "text": "  NOTA: {{ general_customer_note }}", "align": "left", "bold": True,
+                    "classes": ["kitchen-note", "kitchen-order-note"],
+                },
             ],
             "separator_after": [{"text": SEPARATOR, "align": "left"}],
             "location": [{

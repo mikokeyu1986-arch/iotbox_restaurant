@@ -44,6 +44,27 @@ ALIGNS = {"inherit", "left", "center", "right"}
 CUSTOM_KINDS = {"text", "separator", "spacer"}
 CUSTOM_ID = re.compile(r"^custom_[a-z0-9_-]{4,64}$")
 CONTENT_OVERRIDE_BLOCKS = {"company", "invoice", "order_info", "product_header", "footer"}
+# Font size is a glyph *height* multiplier: 1 = 标准, 2 = 中号, 3 = 大号,
+# 4 = 特大, 5 = 超大.  The editor's dropdowns offer exactly this range.  ESC/POS
+# allows up to 8, but a single-width glyph taller than this stops looking like
+# text.  Keep in sync with the <select> options in web/index.html.
+FONT_SIZE_CHOICES = (1, 2, 3, 4, 5)
+MAX_FONT_SIZE = max(FONT_SIZE_CHOICES)
+
+
+def font_size_multipliers(font_size: Any) -> tuple[int, int]:
+    """Map a font-size choice to (width, height) glyph multipliers.
+
+    Height carries the size; width follows at half of it, rounding up.  Width is
+    what costs characters per line, so it only steps up every second level --
+    a level-5 glyph grows to 3x5 instead of 5x5, which keeps roughly twice as
+    many characters on the line for the same height.
+    """
+    try:
+        size = max(1, min(MAX_FONT_SIZE, int(font_size or 1)))
+    except (TypeError, ValueError):
+        size = 1
+    return -(-size // 2), size
 _logger = logging.getLogger(__name__)
 _template_lock = threading.RLock()
 
@@ -149,14 +170,21 @@ def validate_template(payload: Any) -> dict[str, Any]:
             if block_id == "tracking":
                 block["double_size"] = bool(raw.get("double_size", False))
                 try:
-                    block["font_size"] = max(1, min(4, int(raw.get("font_size") or 1)))
+                    block["font_size"] = max(1, min(MAX_FONT_SIZE, int(raw.get("font_size") or 1)))
                 except (TypeError, ValueError):
                     block["font_size"] = 1
             elif block_id == "table":
                 block["tracking_double_size"] = bool(raw.get("tracking_double_size", False))
+                # The table line has always been emitted at double size by the
+                # builder; now that font_size drives it, default to 2 so the
+                # printed result does not change for existing templates.
+                try:
+                    block["font_size"] = max(1, min(MAX_FONT_SIZE, int(raw.get("font_size") or 2)))
+                except (TypeError, ValueError):
+                    block["font_size"] = 2
             elif block_id == "products":
                 try:
-                    block["font_size"] = max(1, min(2, int(raw.get("font_size") or 1)))
+                    block["font_size"] = max(1, min(MAX_FONT_SIZE, int(raw.get("font_size") or 1)))
                 except (TypeError, ValueError):
                     block["font_size"] = 1
             if block_id == "product_header":
@@ -348,31 +376,44 @@ def apply_template(lines: list[dict[str, Any]], template: dict[str, Any] | None 
             if line.get("type") == "product_header":
                 line = _render_product_header(line, selected["paper_width"], block)
             if line.get("type") == "product_line":
+                # The product columns must be laid out for the width the glyphs
+                # will actually occupy, or the row overflows the paper.
                 rendered_lines.extend(
                     _render_product_lines(
                         line,
                         product_header,
                         selected["paper_width"],
-                        int(block.get("font_size") or 1) if block["id"] == "products" else 1,
+                        font_size_multipliers(block.get("font_size") if block["id"] == "products" else 1)[0],
                     )
                 )
             else:
                 rendered_lines.append(line)
         for line in rendered_lines:
+            # A larger size grows the glyph mostly upwards; the width steps up
+            # only every second level (see font_size_multipliers).
             if block["id"] == "tracking" and "tracking-info" in {
                 str(value) for value in line.get("classes") or []
             }:
                 size = int(block.get("font_size") or (2 if block.get("double_size") else 1))
-                line["width_multiplier"] = size
-                line["height_multiplier"] = size
-                line["double_width"] = size > 1
-                line["double_height"] = size > 1
+                width, height = font_size_multipliers(size)
+                line["width_multiplier"] = width
+                line["height_multiplier"] = height
+                line["double_width"] = width > 1
+                line["double_height"] = height > 1
             if block["id"] == "products":
-                size = int(block.get("font_size") or 1)
-                line["width_multiplier"] = size
-                line["height_multiplier"] = size
-                line["double_width"] = size > 1
-                line["double_height"] = size > 1
+                width, height = font_size_multipliers(block.get("font_size"))
+                line["width_multiplier"] = width
+                line["height_multiplier"] = height
+                line["double_width"] = width > 1
+                line["double_height"] = height > 1
+            if block["id"] == "table" and str(line.get("text") or "").strip():
+                # The size the editor's "取餐号双倍字号" toggle controls.  Skipped
+                # for the trailing spacer so it cannot grow the paper feed.
+                width, height = font_size_multipliers(block.get("font_size") or 2)
+                line["width_multiplier"] = width
+                line["height_multiplier"] = height
+                line["double_width"] = width > 1
+                line["double_height"] = height > 1
             if block["align"] != "inherit" and line.get("type") not in {"product_line", "header_meta_line"}:
                 line["align"] = block["align"]
             if block["bold"] != "inherit":
@@ -382,13 +423,15 @@ def apply_template(lines: list[dict[str, Any]], template: dict[str, Any] | None 
         if block_lines:
             for _ in range(block["spacing_after"]):
                 result.append({"type": "spacer", "align": "left", "classes": ["template-spacing"]})
-        if block.get("separator_after") and block_lines:
-            result.append({
-                "text": block.get("separator_after_character", "-") * selected["paper_width"],
-                "align": "left",
-                "classes": ["template-block-separator"],
-            })
-            if block.get("blank_line_after") and block_lines:
+            # Independent of separator_after, matching the two separate toggles in
+            # the editor: "Blank line after block" must work on its own.
+            if block.get("separator_after"):
+                result.append({
+                    "text": block.get("separator_after_character", "-") * selected["paper_width"],
+                    "align": "left",
+                    "classes": ["template-block-separator"],
+                })
+            if block.get("blank_line_after"):
                 result.append({"type": "spacer", "align": "left", "classes": ["template-block-blank-line"]})
     return result
 
@@ -440,17 +483,22 @@ def _split_attribute_quantity(combo_item: str) -> tuple[str, str]:
 
 
 def _render_product_lines(
-    line: dict[str, Any], layout: dict[str, Any], width: int, font_size: int = 1,
+    line: dict[str, Any], layout: dict[str, Any], width: int, width_multiplier: int = 1,
 ) -> list[dict[str, Any]]:
-    font_size = max(1, min(2, int(font_size or 1)))
-    effective_width = max(16, width // font_size)
+    """Lay out a product row for glyphs ``width_multiplier`` times as wide.
+
+    ``width_multiplier`` is the ESC/POS width multiplier, not the font-size
+    level: see ``font_size_multipliers``.
+    """
+    width_multiplier = max(1, min(3, int(width_multiplier or 1)))
+    effective_width = max(16, width // width_multiplier)
     qty_width = int(layout.get("qty_columns") or 6)
     amount_width = int(layout.get("amount_columns") or 10)
     product_width = int(layout.get("product_columns") or 30)
     gutter_width = max(0, int(layout.get("gutter_columns", width - qty_width - product_width - amount_width)))
-    if font_size > 1:
-        qty_width = max(3, min(4, (qty_width + font_size - 1) // font_size))
-        amount_width = min(10, max(9, (amount_width + font_size - 1) // font_size))
+    if width_multiplier > 1:
+        qty_width = max(3, min(4, (qty_width + width_multiplier - 1) // width_multiplier))
+        amount_width = min(10, max(9, (amount_width + width_multiplier - 1) // width_multiplier))
         gutter_width = 1
         product_width = max(4, effective_width - qty_width - gutter_width - amount_width)
     qty = str(line.get("qty") or "")
@@ -479,7 +527,7 @@ def _render_product_lines(
         })
     for option in combo_items:
         option_text = format_option(option, fallback_qty=qty)
-        option_width = product_width if font_size == 1 else effective_width - qty_width
+        option_width = product_width if width_multiplier == 1 else effective_width - qty_width
         for option_part in _wrap_cells(option_text, option_width):
             rows.append({
                 "text": _pad_right((
@@ -499,7 +547,7 @@ def _render_product_lines(
             if original_total
             else f"{discount} de descuento"
         )
-        detail_width = product_width if font_size == 1 else effective_width - qty_width
+        detail_width = product_width if width_multiplier == 1 else effective_width - qty_width
         for discount_part in _wrap_cells(discount_text, detail_width):
             rows.append({
                 "text": _pad_right((

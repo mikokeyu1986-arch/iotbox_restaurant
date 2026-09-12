@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ipaddress
 import hashlib
+import logging
 import os
 import secrets
 import shutil
@@ -19,6 +20,9 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+
+_logger = logging.getLogger(__name__)
 
 
 class CertificateManager:
@@ -501,13 +505,33 @@ class CertificateManager:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _clear_existing_bundle(self) -> None:
+    def clear_server_certificate(self) -> list[str]:
+        """Remove the server certificate so the next start re-issues it.
+
+        Used by unbind, which hands the box to a new deployment.  The leaf is
+        bound to the box's LAN address and is re-issued automatically, so
+        dropping it is safe.
+
+        The signing CA is deliberately **not** touched: clients pin it, so
+        replacing it would invalidate every client that trusts this box (see
+        ``_ensure_ca``).  Because the CA survives, ``.windows_trust_sha256``
+        still matches and is left alone as well.
+
+        A failure to unlink is logged and swallowed -- Windows refuses to remove
+        a file the running process still holds, and an unbind must not fail over
+        a stale certificate.
+
+        Returns the names actually removed.
+        """
+        removed: list[str] = []
         for path in (self.key_path, self.crt_path, self.p12_path):
             try:
                 if path.exists():
                     path.unlink()
-            except OSError:
-                pass
+                    removed.append(path.name)
+            except OSError as exc:
+                _logger.warning("Could not remove %s during unbind: %s", path, exc)
+        return removed
 
     def _is_existing_bundle_usable(self) -> bool:
         if not (self.crt_path.exists() and self.key_path.exists() and self.p12_path.exists()):

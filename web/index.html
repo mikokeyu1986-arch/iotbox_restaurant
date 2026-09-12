@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>IoT Box Runtime Control</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=20260831-product-font" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20260913-kitchen-line-settings" />
   </head>
   <body>
     <main class="app-shell">
@@ -274,10 +274,6 @@
                       <option value="*">****************</option>
                     </select>
                   </label>
-                  <label class="toggle-row editor-toggle">
-                    <input id="receiptBlockBlankLineAfter" type="checkbox" />
-                    <span>Blank line after block</span>
-                  </label>
                   <label id="receiptBlockContentField" class="field hidden">
                     <span>自定义内容</span>
                     <textarea id="receiptBlockContent" rows="5" placeholder="留空时使用订单中的内容"></textarea>
@@ -341,13 +337,13 @@
                       <option value="1">标准</option>
                       <option value="2">中号</option>
                       <option value="3">大号</option>
+                      <option value="4">特大</option>
+                      <option value="5">超大</option>
                     </select>
                   </label>
-                  <div id="kitchenDetailFontFields" class="hidden">
-                    <label class="field"><span>菜品字号</span><select id="kitchenProductFontSize"><option value="1">标准</option><option value="2">中号</option><option value="3">大号</option></select></label>
-                    <label class="field"><span>属性字号</span><select id="kitchenAttributeFontSize"><option value="1">标准</option><option value="2">中号</option><option value="3">大号</option></select></label>
-                    <label class="field"><span>商品备注字号</span><select id="kitchenNoteFontSize"><option value="1">标准</option><option value="2">中号</option><option value="3">大号</option></select></label>
-                    <label class="field"><span>订单备注字号</span><select id="kitchenOrderNoteFontSize"><option value="1">标准</option><option value="2">中号</option><option value="3">大号</option></select></label>
+                  <div id="kitchenLineSettings" class="hidden">
+                    <p class="kitchen-line-hint">这个区块每行的字号与粗细。</p>
+                    <div id="kitchenLineSettingsRows"></div>
                   </div>
                   <button id="receiptDeleteBlock" type="button" class="button-danger receipt-delete-block hidden">删除这个区块</button>
                 </form>
@@ -432,6 +428,6 @@
         </section>
       </section>
     </main>
-    <script src="/assets/app.js?v=20260831-product-font" defer></script>
+    <script src="/assets/app.js?v=20260913-kitchen-line-settings" defer></script>
   </body>
 </html>

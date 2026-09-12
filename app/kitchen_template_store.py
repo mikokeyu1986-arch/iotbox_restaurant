@@ -12,7 +12,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from .receipt_template_store import _apply_horizontal_offset
+from .receipt_template_store import _apply_horizontal_offset, font_size_multipliers
 
 
 BLOCKS = (
@@ -30,6 +30,55 @@ CONTENT_OVERRIDE_BLOCKS = {"tracking", "order_type", "status", "order_meta", "lo
 ALIGNS = {"inherit", "left", "center", "right"}
 CUSTOM_KINDS = {"text", "separator", "spacer"}
 CUSTOM_ID = re.compile(r"^custom_[a-z0-9_-]{4,64}$")
+# Glyph height multipliers; see the matching note in receipt_template_store.
+# Keep in sync with the <select> options in web/index.html.
+FONT_SIZE_CHOICES = (1, 2, 3)
+MAX_FONT_SIZE = max(FONT_SIZE_CHOICES)
+
+# The kitchen ticket's line types, most specific first, with their editor
+# labels and the block whose inspector shows them.  ``apply_kitchen_template``
+# sizes a line by the FIRST of these that it carries, which is what makes
+# ``kitchen-attribute`` win over the ``kitchen-note`` marker that rides along
+# with it (``app/receipt_builder.py:1112``).
+#
+# ``kitchen-note`` and friends are deliberately absent: they never appear on
+# their own (see LINE_CLASS_ALIASES), so a control for one would do nothing.
+# Keep in step with the builder -- ``test_kitchen_line_settings`` asserts it.
+LINE_CLASSES: tuple[tuple[str, str, str], ...] = (
+    ("kitchen-tracking-number", "取餐号", "tracking"),
+    ("kitchen-order-type", "订单类型", "order_type"),
+    ("kitchen-status", "通知 (NUEVO / CANCELA)", "status"),
+    ("kitchen-table-number", "桌号", "order_meta"),
+    ("kitchen-course-header", "菜序标题", "products"),
+    ("kitchen-product-line", "菜品行", "products"),
+    ("kitchen-attribute", "属性", "products"),
+    ("kitchen-product-note", "商品备注", "products"),
+    ("kitchen-order-note", "订单备注", "products"),
+    ("kitchen-footer", "门店名称 / 下单时间", "location"),
+)
+LINE_CLASS_ORDER = tuple(name for name, _, _ in LINE_CLASSES)
+
+# Classes that never appear on their own -- they ride along with one of the
+# types above and must not get their own control:
+#   kitchen-note            on the attribute / product-note / order-note lines
+#   kitchen-cancelled-line  on a cancelled product line
+#   kitchen-location-time   on the same line as kitchen-footer
+LINE_CLASS_ALIASES = frozenset({"kitchen-note", "kitchen-cancelled-line", "kitchen-location-time"})
+
+# Where each line type takes its setting from when migrating a template that
+# still carries the old per-block fields, so the printed ticket does not change.
+_LINE_CLASS_SOURCE: dict[str, tuple[str, str]] = {
+    "kitchen-tracking-number": ("tracking", "font_size"),
+    "kitchen-order-type": ("order_type", "font_size"),
+    "kitchen-status": ("status", "font_size"),
+    "kitchen-table-number": ("order_meta", "font_size"),
+    "kitchen-course-header": ("products", "font_size"),
+    "kitchen-product-line": ("products", "product_font_size"),
+    "kitchen-attribute": ("products", "attribute_font_size"),
+    "kitchen-product-note": ("products", "note_font_size"),
+    "kitchen-order-note": ("products", "order_note_font_size"),
+    "kitchen-footer": ("location", "font_size"),
+}
 _logger = logging.getLogger(__name__)
 _template_lock = threading.RLock()
 
@@ -109,6 +158,16 @@ def validate_kitchen_template(payload: Any) -> dict[str, Any]:
             "bold": bold,
             "horizontal_offset": offset,
             "spacing_after": spacing,
+            # These three drive the "Separator after block" / "Blank line after
+            # block" toggles.  They have to be carried through here or the save
+            # silently discards them before apply_kitchen_template can use them.
+            "separator_after": bool(raw.get("separator_after", False)),
+            "separator_after_character": (
+                str(raw.get("separator_after_character") or "-")[:1]
+                if str(raw.get("separator_after_character") or "-")[:1] in {"-", "=", "*", "·"}
+                else "-"
+            ),
+            "blank_line_after": bool(raw.get("blank_line_after", False)),
         }
         if is_builtin:
             content = str(raw.get("content") or "")[:1000]
@@ -118,7 +177,7 @@ def validate_kitchen_template(payload: Any) -> dict[str, Any]:
                 "note_font_size", "order_note_font_size",
             ):
                 try:
-                    block[size_key] = max(1, min(3, int(raw.get(size_key) or 1)))
+                    block[size_key] = max(1, min(MAX_FONT_SIZE, int(raw.get(size_key) or 1)))
                 except (TypeError, ValueError):
                     block[size_key] = 1
         elif kind == "text":
@@ -148,12 +207,57 @@ def validate_kitchen_template(payload: Any) -> dict[str, Any]:
             "align": "inherit", "bold": "inherit", "horizontal_offset": 0,
             "spacing_after": 0, "content": "",
         })
+    line_font_sizes, line_bold = _line_settings(payload, blocks)
     return {
         "version": 1,
         "name": str(payload.get("name") or "自定义厨房单")[:80],
         "paper_width": 48,
+        "line_font_sizes": line_font_sizes,
+        "line_bold": line_bold,
         "blocks": blocks,
     }
+
+
+def _line_settings(
+    payload: dict[str, Any], blocks: list[dict[str, Any]]
+) -> tuple[dict[str, int], dict[str, bool]]:
+    """Return the per-line-type size and bold maps.
+
+    Every line type gets an explicit size.  Bold is tri-state: an entry exists
+    only when the line type has been given an explicit setting, because the
+    builder marks many lines bold itself and an absent entry must leave that
+    alone.
+
+    A template saved before these maps existed carries the settings on the
+    blocks instead, so they are read from there and the printed ticket is
+    unchanged.
+    """
+    by_id = {block["id"]: block for block in blocks}
+    supplied_sizes = payload.get("line_font_sizes")
+    supplied_bold = payload.get("line_bold")
+    supplied_sizes = supplied_sizes if isinstance(supplied_sizes, dict) else {}
+    supplied_bold = supplied_bold if isinstance(supplied_bold, dict) else {}
+
+    sizes: dict[str, int] = {}
+    bold: dict[str, bool] = {}
+    for class_name in LINE_CLASS_ORDER:
+        source_block, source_key = _LINE_CLASS_SOURCE[class_name]
+        block = by_id.get(source_block) or {}
+
+        raw_size = supplied_sizes.get(class_name)
+        if raw_size is None:
+            raw_size = block.get(source_key)
+        if raw_size is None:
+            raw_size = block.get("font_size")
+        try:
+            sizes[class_name] = max(1, min(MAX_FONT_SIZE, int(raw_size or 1)))
+        except (TypeError, ValueError):
+            sizes[class_name] = 1
+
+        raw_bold = supplied_bold.get(class_name, block.get("bold", "inherit"))
+        if raw_bold in (True, False):
+            bold[class_name] = bool(raw_bold)
+    return sizes, bold
 
 
 def load_kitchen_template() -> dict[str, Any]:
@@ -234,27 +338,47 @@ def apply_kitchen_template(
         for source_line in block_lines:
             line = dict(source_line)
             classes = {str(value) for value in line.get("classes") or []}
+            line_class = next((name for name in LINE_CLASS_ORDER if name in classes), "")
             if kind == "builtin":
-                size = int(block.get("font_size") or 1)
-                if block["id"] == "products":
-                    if "kitchen-product-line" in classes:
-                        size = int(block.get("product_font_size") or size)
-                    elif "kitchen-attribute" in classes:
-                        size = int(block.get("attribute_font_size") or size)
-                    elif "kitchen-product-note" in classes:
-                        size = int(block.get("note_font_size") or size)
-                    elif "kitchen-order-note" in classes:
-                        size = int(block.get("order_note_font_size") or size)
-                line["width_multiplier"] = size
-                line["height_multiplier"] = size
-                line["double_width"] = size > 1
-                line["double_height"] = size > 1
+                # The per-line-type size is authoritative; the block's own
+                # font_size is only a fallback for a line type the map does not
+                # know about.
+                size = (selected.get("line_font_sizes") or {}).get(line_class)
+                if size is None:
+                    size = int(block.get("font_size") or 1)
+                # Height carries the size; width follows at half of it, so a
+                # larger glyph grows mostly upwards instead of eating the line.
+                # double_width/double_height stay in step for text_layout, which
+                # derives its wrapping width from them.
+                width, height = font_size_multipliers(size)
+                line["width_multiplier"] = width
+                line["height_multiplier"] = height
+                line["double_width"] = width > 1
+                line["double_height"] = height > 1
             if block["align"] != "inherit" and line.get("type") not in {"product_line", "header_meta_line"}:
                 line["align"] = block["align"]
             if block["bold"] != "inherit":
                 line["bold"] = block["bold"]
+            # An explicit per-line-type bold wins over the block's, so the four
+            # product sub-lines can be bolded independently of each other.
+            per_line_bold = (selected.get("line_bold") or {}).get(line_class)
+            if per_line_bold is not None:
+                line["bold"] = bool(per_line_bold)
             _apply_horizontal_offset(line, block["horizontal_offset"], 48)
             result.append(line)
         if block_lines:
             result.extend({"type": "spacer", "align": "left"} for _ in range(block["spacing_after"]))
+            # The two toggles are independent in the editor, so they are
+            # independent here too: a blank line must not require a separator.
+            if block.get("separator_after"):
+                result.append({
+                    "text": str(block.get("separator_after_character") or "-") * int(selected["paper_width"]),
+                    "align": "left",
+                    "classes": ["template-block-separator"],
+                })
+            if block.get("blank_line_after"):
+                result.append({
+                    "type": "spacer", "align": "left",
+                    "classes": ["template-block-blank-line"],
+                })
     return result
