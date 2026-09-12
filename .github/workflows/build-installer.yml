@@ -65,6 +65,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: IOTBOX-SETUP
-          path: release/IOTBOX-SETUP.exe
+          # The installer is named from OutputBaseFilename in IOTBOX.iss, which
+          # carries the version (IOTBOX-SETUP-2026.08.21.exe) -- glob it so a
+          # version bump does not silently break the upload.
+          path: release/*.exe
           if-no-files-found: error
           retention-days: 30

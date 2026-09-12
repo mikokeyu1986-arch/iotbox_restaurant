@@ -72,4 +72,7 @@ if (-not $iscc) {
   throw "Inno Setup 6 was not found. Install it, then run this script again."
 }
 & $iscc (Join-Path $root "installer\IOTBOX.iss")
-Write-Host "Installer generated in $root\release\IOTBOX-SETUP.exe"
+# The real file name comes from OutputBaseFilename in installer\IOTBOX.iss and
+# carries the version, so report what actually landed rather than a guess.
+Get-ChildItem (Join-Path $root "release") -Filter "IOTBOX-SETUP*.exe" |
+  ForEach-Object { Write-Host "Installer generated: $($_.FullName)" }
