@@ -488,6 +488,14 @@ async def _cloud_bridge_watchdog() -> None:
 
         # 情况 2：task 在运行但连接断开时间过长
         if not cloud_bridge.connected:
+            # A deliberately unpaired box has no server to reach, so "disconnected
+            # for two minutes" is its normal state, not a fault -- rebuilding the
+            # bridge for it just logs an error every other minute.  The task is
+            # left running; pairing again reconnects it through request_reconnect.
+            connection = config_store.get_connection()
+            if not (connection.get("connected") and connection.get("url")):
+                disconnected_since = 0.0
+                continue
             if disconnected_since == 0.0:
                 disconnected_since = asyncio.get_running_loop().time()
             else:
