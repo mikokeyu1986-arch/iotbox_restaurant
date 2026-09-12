@@ -1,0 +1,64 @@
+name: Build IOTBOX installer
+
+# PyInstaller is not a cross-compiler and Inno Setup is a Windows program, so
+# the Windows installer can only be produced on Windows.  This runs the same
+# build_installer.ps1 that is used by hand, on a Windows runner, and publishes
+# the resulting setup executable.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 3.11 matches the interpreter the installer has been built with so far.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Installs the Windows-only extras too (pywin32, pystray, pywebview),
+          # because their platform markers are active on this runner.
+          python -m pip install -e .
+          python -m pip install pyinstaller
+
+      - name: Verify the build dependencies the script checks for
+        run: |
+          python -c "import pystray, PIL, webview; print('GUI dependencies OK')"
+
+      - name: Install Inno Setup 6
+        run: choco install innosetup --no-progress -y
+
+      # certs/ is git-ignored (it holds the box's private key) but the build
+      # passes it to PyInstaller with --add-data, which fails if it is absent.
+      # The real certificates are generated on the box at first start.
+      - name: Create the ignored placeholder directories
+        shell: pwsh
+        run: |
+          foreach ($dir in @("certs", "release")) {
+            if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+          }
+
+      - name: Build the installer
+        shell: pwsh
+        run: ./build_installer.ps1
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: IOTBOX-SETUP
+          path: release/IOTBOX-SETUP.exe
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,1 @@
+"""Odoo receipt payload adapters."""

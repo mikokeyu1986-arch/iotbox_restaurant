@@ -1,0 +1,23 @@
+app:
+  simulate: 'false'
+  log:
+    level: 'INFO'
+  http:
+    host: '127.0.0.1'
+    port: '6971'
+connect:
+  comercio: '175569458'
+  terminal: '1'
+  clave_firma: 'f522e8f7a5b64e3ae6ef'
+  puerto: 'COM9'
+  version: '6.1'
+odoo:
+  create_url: 'http://127.0.0.1:8070/pos_dataphone_operation/create'
+bridge:
+  powershell_path: 'Py310Host.exe'
+  script_path: 'server/redsys_server/bridge/redsys_py310_bridge.py'
+  dll_path: 'lib/dllTpvpcLatente.dll'
+  runtime_dir: ''
+  dependency_dirs: 'C:/Program Files (x86)/REDSYS/TpvpcWinService;C:/Program Files (x86)/TpvpcImplantado'
+  timeout_seconds: 120
+  log_path: 'data/bridge.log'

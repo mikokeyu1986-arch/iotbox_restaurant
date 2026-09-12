@@ -1,0 +1,38 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+logs/
+*.log
+.venv/
+venv/
+# macOS 开发用的环境；Windows 上重建
+.venv-macos/
+.vscode/
+.idea/
+.DS_Store
+.claude/
+dist/
+build/
+# Inno Setup 的产物目录（由 CI 或 build_installer.ps1 生成）
+release/
+*.egg
+# 编辑前留下的临时备份
+*.bak-*
+runtime_config*.json
+!runtime_config.example.json
+certs/
+spool/
+script_bundle/runtime_config*.json
+script_bundle/certs/
+script_bundle/spool/
+receipt_template.json
+kitchen_template.json
+*.json.bak
+*.json.tmp
+*.json.invalid
+*.qmlc
+*.jsc
+# PowerShell 意外生成的空文件
+
+*.broken

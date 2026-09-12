@@ -1,0 +1,9 @@
+app:
+  log:
+    level: 'INFO'
+connect:
+  comercio: '348105610'
+  terminal: '1'
+  clave_firma: '82b7893e8ef18de6f97f'
+  puerto: '6'
+  version: '8.1'

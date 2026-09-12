@@ -1,0 +1,27 @@
+{
+  "server_connection": {
+    "connected": false,
+    "url": "",
+    "token": "",
+    "db_uuid": "",
+    "enterprise_code": "",
+    "db_name": "",
+    "last_sync_ok": false,
+    "last_sync_message": "",
+    "iot_channel": ""
+  },
+  "local_config": {
+    "ssl_engine": "plain_http",
+    "local_url": "",
+    "iot_identifier": "",
+    "printer_identifier": "",
+    "primary_printer_queue": "",
+    "enabled_printer_queues": [],
+    "printer_aliases": {},
+    "scale_port": "",
+    "scale_baudrate": 9600,
+    "scale_timeout": 1.2,
+    "scale_inter_command_delay": 0.05,
+    "scale_brand": "zfoc"
+  }
+}

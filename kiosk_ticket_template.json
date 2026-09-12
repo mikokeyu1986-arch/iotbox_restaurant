@@ -1,0 +1,1 @@
+{"version":1,"name":"KIOSK 取餐小票","paper_width":48,"blocks":[{"id":"order_type","enabled":true,"font_size":2},{"id":"tracking","enabled":true,"font_size":2},{"id":"barcode","enabled":true,"font_size":1},{"id":"payment_prompt","enabled":true,"font_size":1},{"id":"location","enabled":true,"font_size":1}]}
