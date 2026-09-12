@@ -57,6 +57,9 @@ class DeviceManager(
         self.customer_display_handler = customer_display_handler
         self.iot_identifier = str(iot_identifier or "").strip()
         self.devices: dict[str, Device] = {}
+        # Last raw-TCP printer a discovery pass actually found, so one failed
+        # probe does not drop a printer that is still there.
+        self._last_known_network_printer: Device | None = None
         self._workspace_root = self._detect_workspace_root()
         self.resource_dir = Path(os.getenv("IOT_RESOURCE_DIR", str(self._workspace_root)))
         self._fallback_site_packages_added = False

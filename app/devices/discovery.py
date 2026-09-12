@@ -101,10 +101,20 @@ class DeviceDiscoveryMixin:
 
         network_printers = self._discover_epson_network_printers()
         printers.update(network_printers)
+        if network_printers:
+            # Remember it.  The probe intermittently finds nothing; dropping the
+            # printer for one refresh made ``printer_main`` fall back to the
+            # placeholder below, which has no backend on this host, so the print
+            # failed while the caller was told it had succeeded.
+            self._last_known_network_printer = next(iter(network_printers.values()))
         # On hosts without a native printer queue, make a discovered Epson the
         # default device so generic Odoo print requests use TCP/9100 directly.
-        if network_printers and printers["printer_main"].metadata.get("backend") != "windows":
-            printers["printer_main"] = next(iter(network_printers.values()))
+        # Prefer one found by this refresh, else the last one that was found, so
+        # a single failed probe cannot take a working printer away.
+        if printers["printer_main"].metadata.get("backend") != "windows":
+            fallback = next(iter(network_printers.values()), None) or self._last_known_network_printer
+            if fallback is not None:
+                printers["printer_main"] = fallback
         return printers
 
     def _discover_epson_network_printers(self) -> dict[str, Device]:

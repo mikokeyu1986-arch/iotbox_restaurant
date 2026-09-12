@@ -56,7 +56,10 @@ class ReceiptProcessingMixin:
                     result={"spooled_file": str(target), "printer": self._printer_name(device), "mode": "escpos"},
                 )
             )
-            return True
+            # Report the failure.  Returning True here made a job that never
+            # reached the paper indistinguishable from a printed one: the
+            # caller got ok=true and had no reason to retry or warn.
+            return False
 
         await self.event_bus.publish(
             IoTEvent(
@@ -83,7 +86,7 @@ class ReceiptProcessingMixin:
                     result={"image_file": str(target), "printer": self._printer_name(device), "mode": "native_image"},
                 )
             )
-            return True
+            return False
 
         await self.event_bus.publish(
             IoTEvent(
@@ -180,7 +183,10 @@ class ReceiptProcessingMixin:
                     result={"spooled_file": str(target), "printer": self._printer_name(device), "mode": "zpl"},
                 )
             )
-            return True
+            # Report the failure.  Returning True here made a job that never
+            # reached the paper indistinguishable from a printed one: the
+            # caller got ok=true and had no reason to retry or warn.
+            return False
 
         await self.event_bus.publish(
             IoTEvent(
