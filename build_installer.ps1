@@ -32,7 +32,7 @@ New-Item -ItemType Directory -Path $build | Out-Null
 
 & $pyi --noconfirm --clean --onedir --windowed --name gui_app `
   --icon "$root\assets\iotbox-icon.ico" `
-  --add-data "$root\web;web" --add-data "$root\certs;certs" `
+  --add-data "$root\web;web" --add-data "$root\templates;templates" --add-data "$root\certs;certs" `
   --add-data "$root\runtime_config.json;." --collect-submodules pystray --hidden-import pystray._win32 --hidden-import webview `
   "$root\gui_app.py"
 Assert-PyInstaller "gui_app"
@@ -58,7 +58,7 @@ if (-not (Test-Path (Join-Path $root "dist\redsys_service\redsys_service.exe")))
 # rewrote the shared runtime_config.json to plain_http and broke the pinned CA.
 & $pyi --noconfirm --clean --onedir --console --name run_https `
   --icon "$root\assets\iotbox-icon.ico" `
-  --add-data "$root\web;web" --add-data "$root\certs;certs" `
+  --add-data "$root\web;web" --add-data "$root\templates;templates" --add-data "$root\certs;certs" `
   --collect-all uvicorn --collect-all fastapi --collect-all cryptography `
   "$root\run_https.py"
 Assert-PyInstaller "run_https"

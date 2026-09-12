@@ -92,12 +92,14 @@ def _canonical_default_template() -> dict[str, Any]:
 
 
 def default_template() -> dict[str, Any]:
-    """Return the single customer-receipt template, with a safe fallback."""
-    # The configured path is the editable per-installation override.  Defaults
-    # must always come from the bundled resource, otherwise a new (empty)
-    # override path makes rendering silently fall back to a different layout.
+    """Return the shipped customer-receipt default, with a safe fallback."""
+    # The default lives in templates/ and is tracked in Git; the path returned by
+    # template_path() is the per-installation override.  Keeping them apart is
+    # what lets reset_template() actually restore the shipped layout instead of
+    # writing the override back to itself, and it keeps a tuned installation
+    # from changing what every other box starts from.
     resource_dir = Path(os.getenv("IOT_RESOURCE_DIR", Path(__file__).resolve().parent.parent))
-    bundled_path = resource_dir / "receipt_template.json"
+    bundled_path = resource_dir / "templates" / "receipt_template.json"
     try:
         return validate_template(json.loads(bundled_path.read_text(encoding="utf-8")))
     except Exception:

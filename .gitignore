@@ -26,8 +26,11 @@ spool/
 script_bundle/runtime_config*.json
 script_bundle/certs/
 script_bundle/spool/
-receipt_template.json
-kitchen_template.json
+# The per-installation template overrides.  Anchored to the root on purpose:
+# a bare name would also match templates/receipt_template.json, which is the
+# tracked shipped default and must be in Git.
+/receipt_template.json
+/kitchen_template.json
 *.json.bak
 *.json.tmp
 *.json.invalid

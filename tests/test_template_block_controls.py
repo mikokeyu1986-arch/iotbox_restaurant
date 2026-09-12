@@ -241,6 +241,89 @@ class FontSizeScaleTests(unittest.TestCase):
             self.assertIn(f'<option value="{size}">', html)
 
 
+class ShippedTemplateDefaultTests(unittest.TestCase):
+    """The shipped default and the per-installation override are separate files.
+
+    They used to be the same path, which made reset_template() write the file
+    back to itself (a visible no-op) and let one installation's tuning change
+    what every other box starts from.
+    """
+
+    def test_the_defaults_live_under_templates(self):
+        from pathlib import Path
+
+        from app.kitchen_template_store import default_kitchen_template
+        from app.receipt_template_store import default_template
+
+        root = Path(__file__).resolve().parent.parent
+        self.assertEqual(default_template()["name"], "默认结账小票")
+        self.assertTrue(default_kitchen_template()["blocks"])
+        for name in ("receipt_template.json", "kitchen_template.json"):
+            self.assertTrue((root / "templates" / name).is_file(), f"missing templates/{name}")
+
+    def test_the_default_path_is_not_the_override_path(self):
+        from pathlib import Path
+
+        from app.kitchen_template_store import default_kitchen_template, kitchen_template_path
+        from app.receipt_template_store import default_template, template_path
+
+        root = Path(__file__).resolve().parent.parent
+        self.assertEqual(template_path(), root / "receipt_template.json")
+        self.assertEqual(kitchen_template_path(), root / "kitchen_template.json")
+        self.assertNotEqual(template_path().parent, root / "templates")
+        self.assertEqual(default_template()["paper_width"], 48)
+        self.assertEqual(default_kitchen_template()["paper_width"], 48)
+
+    def test_resetting_restores_the_shipped_layout(self):
+        """A reset must actually change a tuned override back."""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import app.kitchen_template_store as kitchen_store
+
+        with tempfile.TemporaryDirectory() as directory:
+            override = Path(directory) / "kitchen_template.json"
+            with patch.dict(
+                __import__("os").environ, {"IOT_KITCHEN_TEMPLATE_PATH": str(override)}
+            ):
+                tuned = kitchen_store.default_kitchen_template()
+                tuned["name"] = "tuned by the restaurant"
+                kitchen_store.save_kitchen_template(tuned)
+                self.assertEqual(
+                    kitchen_store.load_kitchen_template()["name"], "tuned by the restaurant"
+                )
+                restored = kitchen_store.reset_kitchen_template()
+            self.assertNotEqual(restored["name"], "tuned by the restaurant")
+
+    def test_the_gitignore_keeps_the_overrides_out_but_the_defaults_in(self):
+        """A bare pattern matches at any depth -- the root ones must be anchored."""
+        import subprocess
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        ignored = subprocess.run(
+            ["git", "check-ignore", "receipt_template.json", "kitchen_template.json"],
+            cwd=root, capture_output=True, text=True,
+        )
+        self.assertEqual(
+            len(ignored.stdout.split()), 2, "the per-installation overrides must stay ignored"
+        )
+        tracked = subprocess.run(
+            ["git", "check-ignore", "templates/receipt_template.json", "templates/kitchen_template.json"],
+            cwd=root, capture_output=True, text=True,
+        )
+        self.assertEqual(tracked.stdout.strip(), "", "the shipped defaults must be trackable")
+
+    def test_the_installer_ships_the_defaults(self):
+        from pathlib import Path
+
+        script = (Path(__file__).resolve().parent.parent / "build_installer.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("templates;templates", script)
+
+
 class KitchenLineSettingTests(unittest.TestCase):
     """Each kitchen line type carries its own size and bold."""
 

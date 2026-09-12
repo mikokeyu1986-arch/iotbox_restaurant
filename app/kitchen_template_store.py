@@ -83,7 +83,7 @@ _logger = logging.getLogger(__name__)
 _template_lock = threading.RLock()
 
 
-def default_kitchen_template() -> dict[str, Any]:
+def _canonical_default_kitchen_template() -> dict[str, Any]:
     return {
         "version": 1,
         "name": "默认厨房单",
@@ -103,6 +103,21 @@ def default_kitchen_template() -> dict[str, Any]:
             for key, label in BLOCKS
         ],
     }
+
+
+def default_kitchen_template() -> dict[str, Any]:
+    """Return the shipped kitchen-ticket default, with a safe fallback."""
+    # Like the receipt: the default is the tracked file under templates/, and
+    # kitchen_template_path() is the per-installation override.  Keeping them
+    # apart is what lets reset_kitchen_template() restore the shipped layout and
+    # stops a tuned installation from changing what other boxes start from.
+    resource_dir = Path(os.getenv("IOT_RESOURCE_DIR", Path(__file__).resolve().parent.parent))
+    bundled_path = resource_dir / "templates" / "kitchen_template.json"
+    try:
+        return validate_kitchen_template(json.loads(bundled_path.read_text(encoding="utf-8")))
+    except Exception:
+        _logger.exception("Invalid bundled kitchen default at %s; using canonical layout", bundled_path)
+        return _canonical_default_kitchen_template()
 
 
 def kitchen_template_path() -> Path:

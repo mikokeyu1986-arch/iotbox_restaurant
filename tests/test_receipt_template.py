@@ -5,7 +5,11 @@ import unittest
 from pathlib import Path
 
 from app.receipt_builder import build_kitchen_ticket_lines, build_receipt_lines
-from app.kitchen_template_store import default_kitchen_template, save_kitchen_template
+from app.kitchen_template_store import (
+    default_kitchen_template,
+    save_kitchen_template,
+    validate_kitchen_template,
+)
 from app.printing.product_parser import ProductParserMixin
 from app.printing.image_renderer import ImageRendererMixin
 from app.printing.receipt_metadata import ReceiptMetadataMixin
@@ -43,9 +47,25 @@ SAMPLE_ORDER = {
 }
 
 
+def stock_receipt_template():
+    """The canonical receipt layout, free of any installation's tuning.
+
+    ``stock_receipt_template()`` returns the *shipped* layout, which is deliberately
+    tuned (font sizes, block order, custom blocks).  A test that asserts column
+    geometry or block order must pin its own template, otherwise re-tuning the
+    ticket breaks the suite.
+    """
+    return validate_template({"version": 1, "name": "test", "paper_width": 48, "blocks": []})
+
+
+def stock_kitchen_template():
+    """The canonical kitchen layout, free of any installation's tuning."""
+    return validate_kitchen_template({"version": 1, "name": "test", "paper_width": 48, "blocks": []})
+
+
 class ReceiptTemplateTests(unittest.TestCase):
     def test_default_product_columns_fill_48_characters(self):
-        template = validate_template(default_template())
+        template = validate_template(stock_receipt_template())
         header = next(block for block in template["blocks"] if block["id"] == "product_header")
 
         widths = (
@@ -58,7 +78,7 @@ class ReceiptTemplateTests(unittest.TestCase):
         self.assertEqual(sum(widths), 48)
 
     def test_default_template_has_complete_independent_loyalty_suite(self):
-        template = validate_template(default_template())
+        template = validate_template(stock_receipt_template())
         block_ids = [block["id"] for block in template["blocks"]]
 
         for block_id in ("promotions", "coupons", "vouchers", "loyalty"):
@@ -146,7 +166,7 @@ class ReceiptTemplateTests(unittest.TestCase):
         self.assertEqual(len(header["text"]), 48)
 
     def test_bundled_default_is_the_saved_visual_layout(self):
-        template = default_template()
+        template = stock_receipt_template()
         block_ids = [block["id"] for block in template["blocks"]]
         custom_blocks = [block for block in template["blocks"] if block["kind"] != "builtin"]
 
@@ -155,7 +175,7 @@ class ReceiptTemplateTests(unittest.TestCase):
         self.assertTrue(all(block["kind"] in {"builtin", "text", "separator", "spacer"} for block in custom_blocks))
 
     def test_saved_template_hides_and_reorders_blocks(self):
-        template = default_template()
+        template = stock_receipt_template()
         next(block for block in template["blocks"] if block["id"] == "company")["enabled"] = False
         products = next(block for block in template["blocks"] if block["id"] == "products")
         template["blocks"].remove(products)
@@ -171,13 +191,13 @@ class ReceiptTemplateTests(unittest.TestCase):
         self.assertFalse(any(line.get("text") == "示例餐厅" for line in lines))
 
     def test_unknown_blocks_are_rejected(self):
-        template = default_template()
+        template = stock_receipt_template()
         template["blocks"][0]["id"] = "arbitrary_python"
         with self.assertRaises(ValueError):
             validate_template(template)
 
     def test_old_template_is_migrated_to_fixed_width_with_product_header(self):
-        template = default_template()
+        template = stock_receipt_template()
         template["paper_width"] = 32
         template["blocks"] = [block for block in template["blocks"] if block["id"] != "product_header"]
 
@@ -188,7 +208,7 @@ class ReceiptTemplateTests(unittest.TestCase):
         self.assertLess(ids.index("product_header"), ids.index("products"))
 
     def test_product_header_column_widths_are_editable(self):
-        template = default_template()
+        template = stock_receipt_template()
         header_block = next(block for block in template["blocks"] if block["id"] == "product_header")
         header_block.update({"qty_columns": 8, "amount_columns": 12})
 
@@ -205,7 +225,7 @@ class ReceiptTemplateTests(unittest.TestCase):
         The row keeps all 48 columns and grows taller; multiplying the width
         would reflow it to 24 columns and wrap product names much sooner.
         """
-        template = default_template()
+        template = stock_receipt_template()
         products = next(block for block in template["blocks"] if block["id"] == "products")
         products["font_size"] = 2
 
@@ -223,7 +243,7 @@ class ReceiptTemplateTests(unittest.TestCase):
         self.assertTrue(any("17,00 €" in line["text"] for line in product_rows))
 
     def test_unused_columns_create_a_safe_gutter_before_amount(self):
-        template = default_template()
+        template = stock_receipt_template()
         header_block = next(block for block in template["blocks"] if block["id"] == "product_header")
         header_block.update({"qty_columns": 6, "product_columns": 20, "amount_columns": 10})
         header_block.pop("gutter_columns", None)
@@ -238,7 +258,7 @@ class ReceiptTemplateTests(unittest.TestCase):
         self.assertTrue(header["text"].endswith("Importe"))
 
     def test_explicit_gutter_leaves_unused_columns_after_amount(self):
-        template = validate_template(default_template())
+        template = validate_template(stock_receipt_template())
         header_block = next(block for block in template["blocks"] if block["id"] == "product_header")
         header_block.update({
             "qty_columns": 6,
@@ -258,7 +278,7 @@ class ReceiptTemplateTests(unittest.TestCase):
         self.assertEqual(header["text"][44:], " " * 4)
 
     def test_long_product_names_wrap_without_splitting_words(self):
-        template = validate_template(default_template())
+        template = validate_template(stock_receipt_template())
         header_block = next(block for block in template["blocks"] if block["id"] == "product_header")
         header_block.update({
             "qty_columns": 6,
@@ -299,7 +319,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             "amountPaid": 6.95,
         }
 
-        lines = build_receipt_lines(order, template=default_template())
+        lines = build_receipt_lines(order, template=stock_receipt_template())
         discount_rows = [
             line["text"].strip()
             for line in lines
@@ -309,7 +329,7 @@ class ReceiptTemplateTests(unittest.TestCase):
         self.assertEqual(discount_rows, ["50% de descuento en 13,90 €"])
 
     def test_product_hides_unit_price_and_total_uses_euro_symbol(self):
-        lines = build_receipt_lines(SAMPLE_ORDER, template=default_template())
+        lines = build_receipt_lines(SAMPLE_ORDER, template=stock_receipt_template())
         unit_rows = [
             line["text"].strip()
             for line in lines
@@ -340,7 +360,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             }],
         }
 
-        lines = build_receipt_lines(order, template=default_template())
+        lines = build_receipt_lines(order, template=stock_receipt_template())
         product_row = next(
             line["text"] for line in lines
             if "receipt-product-row" in line.get("classes", [])
@@ -389,7 +409,7 @@ class ReceiptTemplateTests(unittest.TestCase):
                     {"name": "12321", "qty": 2, "unit_price": "12 €"},
                 ],
             }],
-        }, template=default_template())
+        }, template=stock_receipt_template())
         product = next(line for line in lines if "receipt-product-row" in line.get("classes", []))
         options = [
             line["text"].strip() for line in lines
@@ -414,7 +434,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             "header_lines": ["MESA 4"],
             "barcode": {"src": "https://example.test/barcode.png"},
             "items": [],
-        }, template=default_template())
+        }, template=stock_receipt_template())
 
         invoice_index = next(i for i, line in enumerate(lines) if "simplified-invoice-title" in line.get("classes", []))
         tracking_index = next(i for i, line in enumerate(lines) if "tracking-info" in line.get("classes", []))
@@ -436,7 +456,7 @@ class ReceiptTemplateTests(unittest.TestCase):
                 "qrSrc": "data:image/png;base64,ignored",
             }],
         }
-        lines = build_receipt_lines(order, template=default_template())
+        lines = build_receipt_lines(order, template=stock_receipt_template())
         voucher_lines = [
             line for line in lines
             if any(str(cls).startswith("gift-card-") for cls in line.get("classes", []))
@@ -455,7 +475,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             def _escpos_line_width():
                 return 48
 
-        template = validate_template(default_template())
+        template = validate_template(stock_receipt_template())
         next(block for block in template["blocks"] if block["id"] == "vouchers")["enabled"] = False
         next(block for block in template["blocks"] if block["id"] == "qr")["enabled"] = True
         save_template(template)
@@ -499,7 +519,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             }],
         }
 
-        lines = build_receipt_lines(order, template=default_template())
+        lines = build_receipt_lines(order, template=stock_receipt_template())
         redsys_lines = [line for line in lines if "redsys-receipt-line" in line.get("classes", [])]
         nfc_logo = next(line for line in lines if "redsys-nfc-logo" in line.get("classes", []))
 
@@ -528,7 +548,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             }],
         }
 
-        texts = [line.get("text") for line in build_receipt_lines(order, template=default_template())]
+        texts = [line.get("text") for line in build_receipt_lines(order, template=stock_receipt_template())]
 
         for expected in (
             "Tarjeta: VISA", "Tarjeta nº: ************1234", "Autorización: 654321",
@@ -542,7 +562,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             def _escpos_line_width():
                 return 48
 
-        template = default_template()
+        template = stock_receipt_template()
         next(block for block in template["blocks"] if block["id"] == "redsys")["enabled"] = False
         save_template(template)
         source_lines = [
@@ -582,7 +602,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             }],
         }
 
-        lines = build_receipt_lines(order, template=default_template())
+        lines = build_receipt_lines(order, template=stock_receipt_template())
         loyalty_lines = [line for line in lines if "loyalty-points" in line.get("classes", [])]
 
         self.assertEqual(
@@ -614,7 +634,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             },
         }
 
-        lines = build_receipt_lines(order, template=default_template())
+        lines = build_receipt_lines(order, template=stock_receipt_template())
         customer_texts = [
             line.get("text") for line in lines
             if "customer-info" in line.get("classes", [])
@@ -629,7 +649,7 @@ class ReceiptTemplateTests(unittest.TestCase):
     def test_customer_alias_is_supported_when_partner_id_is_absent(self):
         order = {**SAMPLE_ORDER, "partner_id": None, "customer": {"name": "Cliente mostrador", "phone": "123"}}
 
-        lines = build_receipt_lines(order, template=default_template())
+        lines = build_receipt_lines(order, template=stock_receipt_template())
         texts = [line.get("text") for line in lines]
 
         self.assertIn("Cliente mostrador", texts)
@@ -645,7 +665,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             }],
         }
 
-        lines = build_receipt_lines(order, template=default_template())
+        lines = build_receipt_lines(order, template=stock_receipt_template())
         texts = [line.get("text") for line in lines]
 
         self.assertIn("Cupón próxima visita", texts)
@@ -676,7 +696,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             }],
         }
 
-        lines = build_receipt_lines(order, template=default_template())
+        lines = build_receipt_lines(order, template=stock_receipt_template())
         promotion_lines = [
             line for line in lines
             if any(str(value).startswith("promotion-") for value in line.get("classes", []))
@@ -695,7 +715,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             "loyalty_cards": [{"name": "Tarjeta visible", "code": "G-1", "balance": 15}],
             "loyalty_points": [{"points": {"name": "Puntos", "won": 5, "balance": 5}}],
         }
-        template = default_template()
+        template = stock_receipt_template()
         next(block for block in template["blocks"] if block["id"] == "coupons")["enabled"] = False
 
         lines = build_receipt_lines(order, template=template)
@@ -727,7 +747,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             ],
         }
 
-        rendered = build_receipt_lines(order, template=default_template())
+        rendered = build_receipt_lines(order, template=stock_receipt_template())
         texts = [line.get("text") for line in rendered]
 
         for expected in ("Gift", "Discount code", "Buy X Get Y"):
@@ -749,7 +769,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             }],
             "totalDue": "100,00",
         }
-        lines = build_receipt_lines(order, template=default_template())
+        lines = build_receipt_lines(order, template=stock_receipt_template())
         product = next(
             line["text"] for line in lines
             if "receipt-product-row" in line.get("classes", [])
@@ -764,7 +784,7 @@ class ReceiptTemplateTests(unittest.TestCase):
         self.assertEqual(total, "TOTAL 100,00 €")
 
     def test_editor_preview_uses_field_names_and_total_has_no_fixed_separators(self):
-        template = default_template()
+        template = stock_receipt_template()
         next(block for block in template["blocks"] if block["id"] == "company")["enabled"] = True
         lines = build_receipt_lines(SAMPLE_ORDER, template=template, preview_fields=True)
         texts = [line.get("text", "") for line in lines]
@@ -811,7 +831,7 @@ class ReceiptTemplateTests(unittest.TestCase):
         self.assertTrue(any("discount% de descuento en" in row for row in texts))
 
     def test_custom_text_and_footer_override_are_rendered(self):
-        template = default_template()
+        template = stock_receipt_template()
         footer = next(block for block in template["blocks"] if block["id"] == "footer")
         footer["content"] = "自定义页脚\n再次感谢"
         template["blocks"].insert(0, {
@@ -838,7 +858,7 @@ class ReceiptTemplateTests(unittest.TestCase):
 
     def test_kitchen_template_preview_uses_odoo_field_names(self):
         lines = build_kitchen_ticket_lines(
-            SAMPLE_ORDER, template=default_kitchen_template(), preview_fields=True,
+            SAMPLE_ORDER, template=stock_kitchen_template(), preview_fields=True,
         )
         texts = [str(line.get("text") or "") for line in lines]
         product = next(line for line in lines if line.get("type") == "product_line")
@@ -859,7 +879,7 @@ class ReceiptTemplateTests(unittest.TestCase):
         self.assertEqual(footer_meta["right_text"], "{{ date_order.time }}")
 
     def test_kitchen_tracking_is_top_and_table_has_no_prompt_word(self):
-        lines = build_kitchen_ticket_lines(SAMPLE_ORDER, template=default_kitchen_template())
+        lines = build_kitchen_ticket_lines(SAMPLE_ORDER, template=stock_kitchen_template())
 
         self.assertEqual(lines[0].get("text"), "# 42")
         self.assertIn("kitchen-tracking-number", lines[0].get("classes", []))
@@ -874,7 +894,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             "table_id": {"table_number": "A08"},
         }
 
-        lines = build_kitchen_ticket_lines(order, template=default_kitchen_template())
+        lines = build_kitchen_ticket_lines(order, template=stock_kitchen_template())
         texts = [str(line.get("text") or "") for line in lines]
 
         self.assertIn("DELIVERY", texts)
@@ -882,7 +902,7 @@ class ReceiptTemplateTests(unittest.TestCase):
         self.assertFalse(any("MESA" in text for text in texts))
 
     def test_saved_kitchen_template_hides_and_reorders_blocks(self):
-        template = default_kitchen_template()
+        template = stock_kitchen_template()
         next(block for block in template["blocks"] if block["id"] == "status")["enabled"] = False
         location_block = next(block for block in template["blocks"] if block["id"] == "location")
         template["blocks"].remove(location_block)
@@ -916,7 +936,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             ],
         }
 
-        lines = build_kitchen_ticket_lines(order, template=default_kitchen_template())
+        lines = build_kitchen_ticket_lines(order, template=stock_kitchen_template())
         texts = [str(line.get("text") or "") for line in lines]
         products = [line for line in lines if line.get("type") == "product_line"]
 
@@ -942,7 +962,7 @@ class ReceiptTemplateTests(unittest.TestCase):
             },
         }
 
-        lines = build_kitchen_ticket_lines(order, template=default_kitchen_template())
+        lines = build_kitchen_ticket_lines(order, template=stock_kitchen_template())
         products = [line for line in lines if line.get("type") == "product_line"]
 
         self.assertEqual([line["name"] for line in products], ["Ensalada", "Pan"])
