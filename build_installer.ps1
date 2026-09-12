@@ -1,4 +1,14 @@
 $ErrorActionPreference = "Stop"
+
+# $ErrorActionPreference only governs cmdlets, not native programs, so a failing
+# pyinstaller would otherwise be ignored and resurface much later as a
+# confusing missing-file error somewhere downstream.
+function Assert-PyInstaller([string]$step) {
+  if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed while building '$step' (exit code $LASTEXITCODE)."
+  }
+}
+
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $py = (Get-Command python.exe -ErrorAction Stop).Source
 $pyi = Join-Path (Split-Path $py) "Scripts\pyinstaller.exe"
@@ -25,10 +35,12 @@ New-Item -ItemType Directory -Path $build | Out-Null
   --add-data "$root\web;web" --add-data "$root\certs;certs" `
   --add-data "$root\runtime_config.json;." --collect-submodules pystray --hidden-import pystray._win32 --hidden-import webview `
   "$root\gui_app.py"
+Assert-PyInstaller "gui_app"
 
 & $pyi --noconfirm --clean --onefile --windowed --name customer_display_app `
   --icon "$root\assets\iotbox-icon.ico" `
   "$root\customer_display_app.py"
+Assert-PyInstaller "customer_display_app"
 if (-not (Test-Path (Join-Path $root "dist\customer_display_app.exe"))) {
   throw "Customer display build failed."
 }
@@ -37,6 +49,7 @@ Copy-Item (Join-Path $root "dist\customer_display_app.exe") (Join-Path $root "di
 # REDSYS runs as a separate local service.  Bundle its native bridge and
 # resources so the GUI's card-terminal tab also works after installation.
 & $pyi --noconfirm --clean "$root\redsys_service.spec"
+Assert-PyInstaller "redsys_service"
 if (-not (Test-Path (Join-Path $root "dist\redsys_service\redsys_service.exe"))) {
   throw "REDSYS service build failed."
 }
@@ -48,6 +61,7 @@ if (-not (Test-Path (Join-Path $root "dist\redsys_service\redsys_service.exe")))
   --add-data "$root\web;web" --add-data "$root\certs;certs" `
   --collect-all uvicorn --collect-all fastapi --collect-all cryptography `
   "$root\run_https.py"
+Assert-PyInstaller "run_https"
 
 $isccCandidates = @(
   "C:\Program Files\Inno Setup 6\ISCC.exe",

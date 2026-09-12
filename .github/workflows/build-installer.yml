@@ -19,10 +19,10 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 3.11 matches the interpreter the installer has been built with so far.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -41,22 +41,28 @@ jobs:
       - name: Install Inno Setup 6
         run: choco install innosetup --no-progress -y
 
-      # certs/ is git-ignored (it holds the box's private key) but the build
-      # passes it to PyInstaller with --add-data, which fails if it is absent.
-      # The real certificates are generated on the box at first start.
-      - name: Create the ignored placeholder directories
+      # certs/ and runtime_config.json are git-ignored -- the first holds the
+      # box's private key, the second its Odoo pairing token -- but the build
+      # hands both to PyInstaller with --add-data, which fails outright when
+      # they are missing.  The real files are generated on the box itself: the
+      # certificates at first start, the configuration when it is paired.
+      - name: Create the ignored build inputs
         shell: pwsh
         run: |
           foreach ($dir in @("certs", "release")) {
             if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
           }
+          if (-not (Test-Path runtime_config.json)) {
+            Copy-Item runtime_config.example.json runtime_config.json
+          }
+          Get-ChildItem certs, runtime_config.json | Select-Object Name, Length
 
       - name: Build the installer
         shell: pwsh
         run: ./build_installer.ps1
 
       - name: Upload the installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: IOTBOX-SETUP
           path: release/IOTBOX-SETUP.exe
