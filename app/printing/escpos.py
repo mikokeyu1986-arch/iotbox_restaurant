@@ -411,17 +411,19 @@ class EscposEncodingMixin:
                     text = left or right
                 if text:
                     is_bold = bool(raw_line.get("bold"))
-                    dw = bool(raw_line.get("double_width"))
-                    dh = bool(raw_line.get("double_height"))
+                    # Read the multipliers, not the booleans: a template block
+                    # set to 3 must print larger than one set to 2, and the
+                    # booleans collapse every size above 1 into "double".
+                    dw, dh = self._line_size_multipliers(raw_line)
                     chunks.append(self._escpos_align("left"))
                     chunks.append(self._escpos_emphasis(is_bold))
-                    if dw or dh:
+                    if dw != 1 or dh != 1:
                         chunks.append(self._escpos_size(dw, dh))
                     chunks.append(
                         self._escpos_safe_text(text, encoding).encode(encoding, errors="replace")
                     )
-                    if dw or dh:
-                        chunks.append(self._escpos_size(False, False))
+                    if dw != 1 or dh != 1:
+                        chunks.append(self._escpos_size(1, 1))
                     chunks.append(self._escpos_emphasis(False))
                     chunks.append(b"\n")
                 continue
@@ -465,21 +467,21 @@ class EscposEncodingMixin:
             if "invoice-asterisk-border" in classes:
                 continue
 
-            # Apply formatting for regular text lines
+            # Apply formatting for regular text lines.  Multipliers again, so a
+            # template block set to 3 prints larger than one set to 2.
             align = str(raw_line.get("align") or "left")
             is_bold = bool(raw_line.get("bold"))
-            dw = bool(raw_line.get("double_width"))
-            dh = bool(raw_line.get("double_height"))
+            dw, dh = self._line_size_multipliers(raw_line)
 
             chunks.append(self._escpos_align(align))
             chunks.append(self._escpos_emphasis(is_bold))
-            if dw or dh:
+            if dw != 1 or dh != 1:
                 chunks.append(self._escpos_size(dw, dh))
             chunks.append(
                 self._escpos_safe_text(text, encoding).encode(encoding, errors="replace")
             )
-            if dw or dh:
-                chunks.append(self._escpos_size(False, False))
+            if dw != 1 or dh != 1:
+                chunks.append(self._escpos_size(1, 1))
             chunks.append(self._escpos_emphasis(False))
             chunks.append(b"\n")
 
