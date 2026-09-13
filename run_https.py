@@ -4,6 +4,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import sys
+import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -89,6 +90,23 @@ def _advertised_https_url(port: int) -> str:
     return f"https://{host}:{port}"
 
 
+def _trust_the_certificate_in_the_background(certs) -> None:
+    """Install trust automatically on Windows only.
+
+    macOS trust changes can trigger an authorization dialog and must remain an
+    explicit operator action. Certificate generation and HTTPS serving are
+    intentionally independent from trust-store installation.
+    """
+    if sys.platform == "darwin":
+        return
+    try:
+        certs.install_for_current_user()
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Could not trust the IoT HTTPS certificate for this user: %s", exc
+        )
+
+
 def main() -> None:
     host, port = _resolve_host_port()
     advertised_url = _advertised_https_url(port)
@@ -104,10 +122,16 @@ def main() -> None:
         iot_ip=IOT_IP,
         p12_password=os.getenv("IOT_P12_PASSWORD", ""),
     )
-    try:
-        certs.install_for_current_windows_user()
-    except Exception as exc:
-        logging.getLogger(__name__).warning("Could not install IoT HTTPS certificate in the Windows trust store: %s", exc)
+    # Windows can install into the current user's trust store unattended.
+    # macOS installation is deliberately manual: never show an authorization
+    # prompt merely because the IoT Box service started.
+    if sys.platform != "darwin":
+        threading.Thread(
+            target=_trust_the_certificate_in_the_background,
+            args=(certs,),
+            name="iot-certificate-trust",
+            daemon=True,
+        ).start()
     logging.getLogger(__name__).info(
         "Starting IoT HTTPS runtime host=%s port=%s advertised_url=%s",
         host, port, advertised_url,

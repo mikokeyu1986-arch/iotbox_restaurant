@@ -90,6 +90,62 @@ class PrintResultReportingTests(unittest.IsolatedAsyncioTestCase):
             await manager._print_receipt_escpos("owner", self._device(), {})
             self.assertEqual([e.status for e in published], ["error"])
 
+    async def test_full_printer_queue_reports_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = self._manager(directory)
+            queue = asyncio.Queue(maxsize=1)
+            await queue.put({"already": "queued"})
+            manager._ensure_printer_action_queue = lambda identifier: queue
+            manager.event_bus.publish = AsyncMock()
+
+            result = await manager._queue_printer_action(
+                "owner", self._device(), {"action": "print_receipt_escpos"},
+                "_print_receipt_escpos",
+            )
+
+            self.assertFalse(result)
+            self.assertEqual(manager.event_bus.publish.await_args.args[0].message, "ERROR_QUEUE_FULL")
+
+    async def test_worker_exception_reports_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = self._manager(directory)
+
+            async def broken_handler(*args):
+                raise RuntimeError("broken printer")
+
+            manager._broken_handler = broken_handler
+            manager.event_bus.publish = AsyncMock()
+            result = await manager._queue_printer_action(
+                "owner", self._device(), {"action": "print_receipt_escpos"},
+                "_broken_handler",
+            )
+            await manager.shutdown()
+
+            self.assertFalse(result)
+
+    async def test_shutdown_rejects_jobs_that_never_reached_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = self._manager(directory)
+            queue = asyncio.Queue()
+            future = asyncio.get_running_loop().create_future()
+            await queue.put({"future": future})
+            manager._printer_action_queues["printer-1"] = queue
+
+            await manager.shutdown()
+
+            self.assertFalse(await future)
+            self.assertEqual(queue.qsize(), 0)
+
+    def test_missing_portal_qr_is_generated_without_runtime_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = self._manager(directory)
+            lines = manager._ensure_receipt_qr_line([
+                {"text": "https://example.com/pos/ticket/123"},
+            ])
+
+            self.assertEqual(lines[0]["image_kind"], "qr")
+            self.assertIn("barcode_type=QR", lines[0]["src"])
+
 
 class RememberedPrinterTests(unittest.TestCase):
     """A failed discovery probe must not take a working printer away."""

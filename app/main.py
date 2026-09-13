@@ -40,6 +40,13 @@ from .kitchen_template_store import (
     validate_kitchen_template,
 )
 from .receipt_template_store import load_template, reset_template, save_template, validate_template
+from .printer_profile import (
+    DEFAULT_PROFILE,
+    active_columns,
+    calibration_lines,
+    line_diagnostics,
+    validate_printer_profile,
+)
 from .version import APP_VERSION
 from .vfd_writer import write_serial as write_vfd_serial
 
@@ -238,6 +245,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_private_network=True,
 )
 
 
@@ -247,6 +255,24 @@ def _is_loopback_request(request: Request) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return host.lower() == "localhost"
+
+
+def _is_local_machine_request(request: Request) -> bool:
+    """Accept the machine's advertised LAN address as local administration.
+
+    Browsers opened on the IoT Box commonly use its certificate/LAN address
+    instead of 127.0.0.1.  In that case the kernel reports the client as the
+    same LAN IP; treating it as remote made the dashboard load `/api/status`
+    but reject every editor request with 403.
+    """
+    if _is_loopback_request(request):
+        return True
+    client_host = request.client.host if request.client else ""
+    advertised_host = urlsplit(f"//{IOT_IP}").hostname or ""
+    try:
+        return ipaddress.ip_address(client_host) == ipaddress.ip_address(advertised_host)
+    except ValueError:
+        return bool(client_host) and client_host.lower() == advertised_host.lower()
 
 
 def _is_same_origin(request: Request) -> bool:
@@ -268,13 +294,27 @@ def _is_paired_odoo_origin(request: Request) -> bool:
     )
 
 
+def _is_private_network_preflight(request: Request) -> bool:
+    return (
+        request.method == "OPTIONS"
+        and request.headers.get("access-control-request-private-network", "").lower() == "true"
+    )
+
+
 @app.middleware("http")
 async def protect_admin_api(request: Request, call_next):
     """Keep the administration API local unless a shared token is supplied."""
     configured_token = os.getenv("IOT_ADMIN_TOKEN", "").strip()
     supplied_token = request.headers.get("x-iot-admin-token", "").strip()
     token_ok = bool(configured_token) and hmac.compare_digest(configured_token, supplied_token)
-    local_ok = _is_loopback_request(request) and _is_same_origin(request)
+    local_ok = _is_local_machine_request(request) and _is_same_origin(request)
+    if _is_private_network_preflight(request) and not (
+        _is_paired_odoo_origin(request) or local_ok or token_ok
+    ):
+        return JSONResponse(
+            status_code=403,
+            content={"status": "error", "detail": "Untrusted private network origin"},
+        )
     if request.url.path.startswith("/api/"):
         # The public certificate contains no private key and must be
         # downloadable by LAN clients so they can trust direct HTTPS calls to
@@ -682,6 +722,20 @@ async def _execute_iot_action_background(session_id: str, device_identifier: str
                 owner=session_id,
                 status="error",
                 message="ERROR_PRINTER",
+                result={"mode": action or "unknown"},
+            )
+        )
+    else:
+        # The POS learns that a print finished from /iot_drivers/event: it
+        # registers a listener for the device and waits for the box to report
+        # the action status.  Publishing on failure only left every successful
+        # kitchen print unanswered until the 50 s poll expired, which the POS
+        # shows as an order stuck in "not sent".
+        await event_bus.publish(
+            IoTEvent(
+                device_identifier=device_identifier,
+                owner=session_id,
+                status="success",
                 result={"mode": action or "unknown"},
             )
         )
@@ -1671,11 +1725,75 @@ async def api_preview_receipt_template(payload: dict[str, Any]) -> dict[str, Any
         _logger.exception("Failed to read last Odoo request for receipt preview")
     if preview_lines is None:
         preview_lines = build_receipt_lines(_receipt_preview_order(), template=template, preview_fields=True)
+    profile = validate_printer_profile(config_store.get_local_config().get("printer_profile") or DEFAULT_PROFILE)
     return {
         "status": "success",
         "template": template,
         "lines": preview_lines,
+        "profile": profile,
+        "diagnostics": line_diagnostics(preview_lines, profile),
     }
+
+
+@app.get("/api/printer-profile")
+async def api_printer_profile() -> dict[str, Any]:
+    profile = validate_printer_profile(config_store.get_local_config().get("printer_profile") or DEFAULT_PROFILE)
+    return {"status": "success", "profile": profile, "active_columns": active_columns(profile)}
+
+
+@app.put("/api/printer-profile")
+async def api_save_printer_profile(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        profile = validate_printer_profile(payload)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    config_store.update_local_config(printer_profile=profile)
+    return {"status": "success", "profile": profile, "active_columns": active_columns(profile)}
+
+
+async def _print_studio_lines(lines: list[dict[str, Any]], profile: dict[str, Any]) -> dict[str, Any]:
+    device_identifier = str(config_store.get_local_config().get("printer_identifier") or "printer_main")
+    success = await device_manager.execute(
+        f"receipt-studio-{int(time.time() * 1000)}",
+        device_identifier,
+        {"action": "print_receipt_escpos", "receipt": {"lines": lines, "cut": profile["cut"]}},
+    )
+    if not success:
+        raise HTTPException(status_code=503, detail="打印机不可用或任务提交失败")
+    return {"status": "success", "device_identifier": device_identifier}
+
+
+@app.post("/api/printer-profile/calibration/preview")
+async def api_calibration_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        profile = validate_printer_profile(payload)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    lines = calibration_lines(profile)
+    return {"status": "success", "profile": profile, "lines": lines, "diagnostics": line_diagnostics(lines, profile)}
+
+
+@app.post("/api/printer-profile/calibration/print")
+async def api_calibration_print(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        profile = validate_printer_profile(payload)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return await _print_studio_lines(calibration_lines(profile), profile)
+
+
+@app.post("/api/receipt-template/print-preview")
+async def api_print_receipt_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        template = validate_template(payload)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    profile = validate_printer_profile(config_store.get_local_config().get("printer_profile") or DEFAULT_PROFILE)
+    lines = build_receipt_lines(_receipt_preview_order(), template=template, preview_fields=True)
+    problems = [item for item in line_diagnostics(lines, profile) if item["overflow"]]
+    if problems:
+        raise HTTPException(status_code=400, detail=f"有 {len(problems)} 行超出可打印宽度，请先修正")
+    return await _print_studio_lines(lines, profile)
 
 
 @app.get("/api/kitchen-template")

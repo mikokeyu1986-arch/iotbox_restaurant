@@ -56,6 +56,7 @@ class ConfigStore:
             "zpl_probe_timeout": 0.6,
             "zpl_encoding": "utf-8",
             "printer_language_overrides": {},
+            "printer_profile": {},
             "scale_port": "",
             "scale_baudrate": 9600,
             "scale_timeout": 1.2,

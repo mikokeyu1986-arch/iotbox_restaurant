@@ -54,21 +54,26 @@ class EventBus:
             len(self._events),
         )
 
-        found = self._find_matching(devices, last_event, expected_owners)
-        if found:
-            found["session_id"] = session_id
-            _logger.info(
-                "EventBus poll hit session_id=%s device=%s owner=%s status=%s",
-                session_id,
-                found.get("device_identifier", ""),
-                found.get("owner", ""),
-                found.get("status", ""),
-            )
-            return found
-
         deadline = time() + timeout_seconds
         async with self._condition:
             while True:
+                # Check while holding the same condition lock used by publish().
+                # Previously the first check happened before acquiring this
+                # lock.  A fast printer could publish between that check and
+                # condition.wait(), losing the notification and leaving the
+                # POS blocked for the full 50-second poll timeout.
+                found = self._find_matching(devices, last_event, expected_owners)
+                if found:
+                    found["session_id"] = session_id
+                    _logger.info(
+                        "EventBus poll hit session_id=%s device=%s owner=%s status=%s retained_events=%s",
+                        session_id,
+                        found.get("device_identifier", ""),
+                        found.get("owner", ""),
+                        found.get("status", ""),
+                        len(self._events),
+                    )
+                    return found
                 remaining = deadline - time()
                 if remaining <= 0:
                     _logger.info(
@@ -90,18 +95,6 @@ class EventBus:
                         len(self._events),
                     )
                     return None
-                found = self._find_matching(devices, last_event, expected_owners)
-                if found:
-                    found["session_id"] = session_id
-                    _logger.info(
-                        "EventBus poll hit session_id=%s device=%s owner=%s status=%s retained_events=%s",
-                        session_id,
-                        found.get("device_identifier", ""),
-                        found.get("owner", ""),
-                        found.get("status", ""),
-                        len(self._events),
-                    )
-                    return found
 
     def _find_matching(
         self, devices: set[str], last_event: float, expected_owners: set[str] | None = None

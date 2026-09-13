@@ -406,17 +406,24 @@ class ReceiptProcessingMixin:
         target = self.spool_dir / f"receipt_{int(time() * 1000)}_{uuid4().hex[:8]}.bin"
         try:
             build_started_at = time()
+            profile = self.local_config_getter().get("printer_profile", {})
+            profile_cut = (
+                profile.get("cut", True)
+                if isinstance(profile, dict) and profile.get("columns_font_a") is not None
+                else True
+            )
+            cut_enabled = bool(payload.get("cut", profile_cut))
             if is_kitchen_ticket:
                 # Kitchen tickets use plain-text ESC/POS (no formatting)
                 escpos_bytes = self._build_kitchen_escpos_bytes(
                     lines,
-                    cut=bool(payload.get("cut", True)),
+                    cut=cut_enabled,
                     payload=payload,
                 )
             else:
                 escpos_bytes = self._build_escpos_bytes(
                     lines,
-                    cut=bool(payload.get("cut", True)),
+                    cut=cut_enabled,
                     payload=payload,
                     # Raw Odoo orders and structured receipts have already
                     # passed through the visual template. Normalizing them a

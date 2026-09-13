@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+from .printing.product_options import option_label
+
 _logger = logging.getLogger(__name__)
 
 SEPARATOR = "-" * 48
@@ -209,6 +211,36 @@ def _table_text(order: dict[str, Any]) -> str:
     )
 
 
+def _relation_name(value: Any) -> str:
+    """Return a readable name from common Odoo relation payload shapes."""
+    if isinstance(value, dict):
+        return _text(value.get("name") or value.get("display_name"))
+    if isinstance(value, (list, tuple)) and len(value) > 1:
+        return _text(value[1])
+    return _text(value)
+
+
+def _floor_text(order: dict[str, Any]) -> str:
+    direct = _relation_name(order.get("floor_name") or order.get("floor_id") or order.get("floor"))
+    if direct:
+        return direct
+    table = order.get("table_id") or order.get("table")
+    if isinstance(table, dict):
+        return _relation_name(table.get("floor_id") or table.get("floor"))
+    return ""
+
+
+def _kitchen_table_text(order: dict[str, Any]) -> str:
+    table = _table_text(order)
+    floor = _floor_text(order)
+    if not floor:
+        return table
+    if not table:
+        return floor
+    table_label = table if re.match(r"^T(?:ABLE)?\s*[-:#]?\s*", table, re.I) else f"T {table}"
+    return f"{floor} - {table_label}"
+
+
 # ── line / discount helpers ───────────────────────────────────────────
 
 def _pick_number(line: dict[str, Any], keys: list[str]) -> Decimal:
@@ -370,7 +402,7 @@ def _split_name_and_options(line: dict[str, Any]) -> tuple[str, list[str]]:
         )
         attr_str = _text(display.get("attributeString") or display.get("attribute_string"))
         if attr_str:
-            options.extend(s.strip() for s in attr_str.split(",") if s.strip())
+            options.extend(s.strip() for s in re.split(r"[,\r\n]+", attr_str) if s.strip())
     else:
         base_name = (
             _text(line.get("basic_name"))
@@ -395,7 +427,23 @@ def _split_name_and_options(line: dict[str, Any]) -> tuple[str, list[str]]:
     name_match = re.match(r"^(.*?)\s*\(([^()]*)\)\s*$", full_name_for_attributes)
     if name_match:
         options.extend(s.strip() for s in name_match.group(2).split(",") if s.strip())
-    options = list(dict.fromkeys(options))
+    # Normalize before deduplication. Odoo may send the same attribute once in
+    # ``attributeString`` (sometimes with quantity/price) and again in
+    # ``attribute_value_names``. Prefer the quantity-bearing form.
+    normalized_options: list[str] = []
+    option_positions: dict[str, int] = {}
+    for option in options:
+        label = option_label(option)
+        if not label:
+            continue
+        identity = re.sub(r"^\d+(?:[.,]\d+)?\s*[xX×]\s*", "", label).strip().casefold()
+        position = option_positions.get(identity)
+        if position is None:
+            option_positions[identity] = len(normalized_options)
+            normalized_options.append(label)
+        elif re.match(r"^\d+(?:[.,]\d+)?\s*[xX×]\s*", label):
+            normalized_options[position] = label
+    options = normalized_options
     if any(option.lower().startswith("customization: custom:") for option in options):
         options = [option for option in options if option.lower() != "custom"]
     options = [
@@ -1028,9 +1076,9 @@ def build_kitchen_ticket_lines(
     })
     mark_block(block_start, "status")
 
-    # ── 4. Table number value only (no MESA/TABLE prompt) ──
+    # ── 4. Floor and table (fall back to table for legacy payloads) ──
     block_start = len(lines)
-    table = _table_text(order)
+    table = _kitchen_table_text(order)
     if table:
         lines.append({
             "text": table,
@@ -1108,8 +1156,13 @@ def build_kitchen_ticket_lines(
         })
         if options:
             for opt in options:
+                # "Extra queso (+1,50 €)" is a receipt label; the kitchen only
+                # needs to know what to prepare, so the amount is dropped.
+                label = option_label(opt)
+                if not label:
+                    continue
                 lines.append({
-                    "text": f"    + {opt}",
+                    "text": f"    + {label}",
                     "align": "left",
                     "classes": ["kitchen-note", "kitchen-attribute"],
                 })
@@ -1202,7 +1255,7 @@ def build_kitchen_ticket_lines(
                 "double_width": True, "double_height": True,
             }],
             "order_meta": [{
-                "text": "{{ table_id.table_number }}", "align": "center", "bold": True,
+                "text": "{{ floor_name }} - T {{ table_id.table_number }}", "align": "center", "bold": True,
                 "double_width": True, "double_height": True,
                 "classes": ["kitchen-table-number"],
             }],

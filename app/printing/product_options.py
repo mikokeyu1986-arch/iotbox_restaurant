@@ -43,6 +43,54 @@ def format_option(item: Any, fallback_qty: str = "") -> str:
     return f"{prefix}{name}{price_suffix}"
 
 
+def option_label(item: Any, fallback_qty: str = "") -> str:
+    """Return an option without its price, for tickets that show no amounts.
+
+    The kitchen ticket lists what to cook, not what it costs, so an attribute
+    price must never reach it -- neither from a structured option
+    (``{"name": ..., "unit_price": ...}``) nor from a label that already
+    carries the amount (``"Extra queso (+1,50 €)"``).
+    """
+    if isinstance(item, dict):
+        quantity, name, _price = option_parts(item, fallback_qty=fallback_qty)
+        if not name:
+            return ""
+        # Same rule as format_option: a plain 1 adds nothing to the kitchen.
+        return f"{quantity} X {name}" if quantity and not _is_one(quantity) else name
+    cleaned = strip_option_price(item)
+    prefix_match = re.match(r"^\+?\s*(\d+(?:[.,]\d+)?)\s*[xX×]\s*(.+)$", cleaned)
+    if prefix_match:
+        quantity = _clean_number(prefix_match.group(1))
+        name = prefix_match.group(2).strip()
+        return f"{quantity} X {name}" if not _is_one(quantity) else name
+    return cleaned
+
+
+def strip_option_price(text: Any) -> str:
+    """Drop a trailing price such as ``(+1,50 €)`` from an option label."""
+    value = str(text or "").strip()
+    match = _TRAILING_PARENS.search(value)
+    if match and _looks_like_price(match.group(1)):
+        return value[: match.start()].strip()
+    return value
+
+
+# A price is only ever stripped when the parenthesised tail really reads as
+# money, so a qualifier such as "(sin gluten)" survives untouched.
+_TRAILING_PARENS = re.compile(r"\s*[（(]\s*\+?\s*([^()（）]*)\s*[）)]\s*$")
+_PRICE_MARKERS = ("€", "$", "¥", "eur", "usd", "元")
+
+
+def _looks_like_price(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text or not any(char.isdigit() for char in text):
+        return False
+    lowered = text.lower()
+    if any(marker in lowered for marker in _PRICE_MARKERS):
+        return True
+    return bool(re.fullmatch(r"\+?\s*\d+(?:[.,]\d+)?", text))
+
+
 def _first_text(item: dict[str, Any], *keys: str) -> str:
     for key in keys:
         value = item.get(key)

@@ -14,6 +14,7 @@ from .devices.discovery import DeviceDiscoveryMixin
 from .printing.barcode import BarcodeMixin
 from .printing.escpos import EscposEncodingMixin
 from .printing.image_renderer import ImageRendererMixin
+from .printing.job_queue import reject_queued_jobs
 from .printing.network_printer import NetworkPrinterMixin
 from .printing.normalization import ReceiptNormalizationMixin
 from .printing.product_parser import ProductParserMixin
@@ -110,12 +111,13 @@ class DeviceManager(
 
     async def shutdown(self) -> None:
         printer_tasks = list(self._printer_action_tasks.values())
-        self._printer_action_tasks.clear()
-        self._printer_action_queues.clear()
         for task in printer_tasks:
             task.cancel()
         if printer_tasks:
             await asyncio.gather(*printer_tasks, return_exceptions=True)
+        reject_queued_jobs(self._printer_action_queues)
+        self._printer_action_tasks.clear()
+        self._printer_action_queues.clear()
 
     def refresh_local_hardware(self) -> None:
         self._refresh_devices(force=True)
@@ -232,7 +234,7 @@ class DeviceManager(
                     result={"printer": self._printer_name(device), "mode": action},
                 )
             )
-            return True
+            return False
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bool] = loop.create_future()
@@ -371,7 +373,7 @@ class DeviceManager(
                         )
                     )
                 if isinstance(future, asyncio.Future) and not future.done():
-                    future.set_result(True)
+                    future.set_result(False)
             finally:
                 queue.task_done()
 

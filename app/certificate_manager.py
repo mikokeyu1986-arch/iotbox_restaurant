@@ -12,10 +12,12 @@ import ipaddress
 import hashlib
 import logging
 import os
+import re
 import secrets
 import shutil
 import ssl
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -25,12 +27,30 @@ from typing import Any
 _logger = logging.getLogger(__name__)
 
 
+def current_trust_platform() -> str:
+    """Which platform trust store this box can write: "windows", "macos" or "".
+
+    Both systems keep the box's CA in the running user's own trust store, so
+    neither needs an administrator: Windows has ``certutil``, macOS has
+    ``security add-trusted-cert``.
+    """
+    if os.name == "nt":
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    return ""
+
+
 class CertificateManager:
     _CA_COMMON_NAME = "Custom IoT Box CA"
     _CA_VALIDITY_DAYS = 3650
     # Server certificates are re-issued whenever the box address changes, so
     # they only need to outlive the next re-issue.
     _LEAF_VALIDITY_DAYS = 3650
+    # Long enough for an operator to answer the macOS authorisation dialog.
+    _MACOS_TRUST_TIMEOUT_SECONDS = 120
+    # How long a reported trust state is reused before the store is read again.
+    _TRUST_CACHE_SECONDS = 30
 
     def __init__(
         self,
@@ -50,6 +70,8 @@ class CertificateManager:
         self.ca_key_path = self.certs_dir / "iotbox-ca.key"
         self.ca_crt_path = self.certs_dir / "iotbox-ca.crt"
         self.windows_trust_marker_path = self.certs_dir / ".windows_trust_sha256"
+        self.macos_trust_marker_path = self.certs_dir / ".macos_trust_sha256"
+        self._trust_cache: tuple[float, bool | None] | None = None
 
     def ensure(self) -> None:
         self.certs_dir.mkdir(parents=True, exist_ok=True)
@@ -60,20 +82,54 @@ class CertificateManager:
         # re-issues the certificate once, from then on the pin survives every
         # re-issue.
         ca_created = self._ensure_ca()
-        if not password_created and not ca_created and self._is_existing_bundle_usable():
-            return
+        problem = None
+        if not password_created and not ca_created:
+            problem = self._bundle_problem()
+            if problem is None:
+                return
         # Generate the complete replacement before touching the active files.
         # If OpenSSL/cryptography fails, the currently loaded HTTPS assets stay
         # intact and the next startup can retry safely.
         self._generate_with_best_available()
+        # Every re-issue invalidates a client's per-certificate exception, which
+        # is exactly how a working POS starts failing right after a restart.
+        _logger.info(
+            "Re-issued the IoT Box HTTPS server certificate reason=%s address=%s; "
+            "clients must trust the CA at %s rather than a previously saved certificate",
+            problem or "installation identity changed",
+            self.iot_ip,
+            self.ca_crt_path,
+        )
+
+    def trusted_state_cached(self) -> bool | None:
+        """``is_trusted_for_current_user`` for surfaces that are polled often.
+
+        Reading the platform trust store costs a subprocess, and the control
+        page asks for the status every few seconds.
+        """
+        now = time.time()
+        if self._trust_cache is not None and now - self._trust_cache[0] < self._TRUST_CACHE_SECONDS:
+            return self._trust_cache[1]
+        try:
+            trusted = self.is_trusted_for_current_user()
+        except Exception:
+            _logger.exception("Unable to read the certificate trust state")
+            trusted = None
+        self._trust_cache = (now, trusted)
+        return trusted
 
     def status(self) -> dict[str, Any]:
+        trusted = self.trusted_state_cached()
         return {
             "crt_ready": self.crt_path.exists(),
             "p12_ready": self.p12_path.exists(),
             "ca_ready": self.ca_crt_path.exists(),
             "password_configured": bool(self.p12_password),
             "password_file": str(self.password_path),
+            # Whether *this* machine trusts the CA the box signs with.  A client
+            # that does not will block every request to the box, which the POS
+            # can only report as a printer error.
+            "ca_trusted": trusted,
         }
 
     def install_for_current_windows_user(self) -> bool:
@@ -108,6 +164,160 @@ class CertificateManager:
             raise RuntimeError(f"Unable to trust the IoT Box HTTPS certificate: {detail}")
         self.windows_trust_marker_path.write_text(digest, encoding="ascii")
         return True
+
+    def install_for_current_macos_user(self) -> bool:
+        """Trust the box's CA for the current macOS user.
+
+        Without this, macOS browsers keep a per-certificate exception instead,
+        and every re-issue of the server certificate -- which happens whenever
+        the box address changes -- silently invalidates it: the POS then reports
+        a printer error even though the box never sees a request.
+        """
+        if sys.platform != "darwin":
+            return False
+        self.ensure()
+        trust_path = self.ca_crt_path if self.ca_crt_path.exists() else self.crt_path
+        digest = hashlib.sha256(trust_path.read_bytes()).hexdigest()
+        try:
+            if self.macos_trust_marker_path.read_text(encoding="ascii").strip() == digest:
+                return True
+        except OSError:
+            pass
+
+        # macOS authorises trust changes interactively.  The runtime is a
+        # LaunchAgent in the user's GUI session, so the dialog can be answered;
+        # the timeout bounds the wait when nobody is there to answer it.
+        try:
+            completed = subprocess.run(
+                [
+                    "security", "add-trusted-cert", "-r", "trustRoot",
+                    "-k", self._macos_user_keychain(), str(trust_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self._MACOS_TRUST_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(
+                "Trusting the IoT Box CA needs an administrator to approve the macOS prompt"
+            ) from error
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            raise RuntimeError(f"Unable to trust the IoT Box HTTPS certificate: {detail}")
+        # macOS reports success even when it stored the certificate without a
+        # trust setting, which leaves every client rejecting the box, so the
+        # result is read back before it is called done.
+        if not self.is_trusted_for_current_user():
+            raise RuntimeError(
+                "macOS kept no trust setting for the IoT Box CA. Run this in a Terminal "
+                "(it needs an authorisation prompt the box cannot answer unattended): "
+                f"sudo security add-trusted-cert -d -r trustRoot "
+                f"-k /Library/Keychains/System.keychain {trust_path}"
+            )
+        self.macos_trust_marker_path.write_text(digest, encoding="ascii")
+        return True
+
+    def install_for_current_user(self) -> bool:
+        """Trust the box's CA for whoever is running this box, if this OS needs it."""
+        platform = current_trust_platform()
+        if platform == "windows":
+            return self.install_for_current_windows_user()
+        if platform == "macos":
+            return self.install_for_current_macos_user()
+        return False
+
+    def is_trusted_for_current_user(self) -> bool | None:
+        """Whether this box's CA is trusted here; ``None`` when not applicable.
+
+        The marker alone would report a trust that someone has since removed, so
+        the answer is read back from the platform trust store.
+        """
+        platform = current_trust_platform()
+        if platform == "windows":
+            try:
+                return self.windows_trust_marker_path.read_text(encoding="ascii").strip() == \
+                    hashlib.sha256(self._trust_path().read_bytes()).hexdigest()
+            except OSError:
+                return False
+        if platform != "macos":
+            return None
+        if not self.ca_crt_path.exists():
+            return False
+        for domain in ([], ["-d"]):
+            completed = subprocess.run(
+                ["security", "dump-trust-settings", *domain],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                continue
+            for name, settings, fingerprints in self._macos_trust_entries(completed.stdout):
+                if name != self._CA_COMMON_NAME or settings <= 0:
+                    continue
+                wanted = self._sha1_fingerprint(self.ca_crt_path)
+                # A stored certificate without a trust setting is listed here
+                # too, which is why the setting count and the fingerprint both
+                # have to agree.
+                if not fingerprints or wanted in fingerprints:
+                    return True
+        return False
+
+    @staticmethod
+    def _macos_trust_entries(dump: str) -> list[tuple[str, int, str]]:
+        """Parse ``dump-trust-settings`` into ``(name, trust settings, hashes)``."""
+        entries: list[tuple[str, int, str]] = []
+        name = ""
+        settings = 0
+        hashes = ""
+        for line in dump.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Cert ") and ":" in stripped:
+                if name:
+                    entries.append((name, settings, hashes))
+                name = stripped.split(":", 1)[1].strip()
+                settings = 0
+                hashes = ""
+            elif stripped.lower().startswith("number of trust settings"):
+                try:
+                    settings = int(stripped.split(":", 1)[1].strip())
+                except (IndexError, ValueError):
+                    settings = 0
+            elif "hash" in stripped.lower():
+                # "SHA-1 hash: BA90A8F3..." -- only the value is a fingerprint.
+                hashes += CertificateManager._normalized_fingerprints(stripped.split(":", 1)[-1])
+        if name:
+            entries.append((name, settings, hashes))
+        return entries
+
+    def _trust_path(self) -> Path:
+        return self.ca_crt_path if self.ca_crt_path.exists() else self.crt_path
+
+    @staticmethod
+    def _sha1_fingerprint(cert_path: Path) -> str:
+        """SHA-1 of the DER form, which is how ``dump-trust-settings`` lists certs."""
+        try:
+            der = ssl.PEM_cert_to_DER_cert(cert_path.read_text(encoding="ascii"))
+        except (OSError, ValueError):
+            return ""
+        return hashlib.sha1(der).hexdigest().upper()
+
+    @staticmethod
+    def _normalized_fingerprints(dump: str) -> str:
+        return re.sub(r"[^0-9A-F]", "", dump.upper())
+
+    def _macos_user_keychain(self) -> str:
+        completed = subprocess.run(
+            ["security", "default-keychain", "-d", "user"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        path = completed.stdout.strip().strip('"')
+        if completed.returncode == 0 and path:
+            return path
+        return str(Path.home() / "Library" / "Keychains" / "login.keychain-db")
 
     def _ensure_p12_password(self) -> bool:
         if self.p12_password:
@@ -533,33 +743,44 @@ class CertificateManager:
                 _logger.warning("Could not remove %s during unbind: %s", path, exc)
         return removed
 
-    def _is_existing_bundle_usable(self) -> bool:
-        if not (self.crt_path.exists() and self.key_path.exists() and self.p12_path.exists()):
-            return False
+    def _bundle_problem(self) -> str | None:
+        """Why the active server certificate has to be re-issued, if it has to.
+
+        Returns ``None`` when the current bundle is still good.  The reason is
+        logged on every re-issue: "clients suddenly cannot reach the box" is
+        otherwise indistinguishable from a network fault.
+        """
+        missing = [
+            path.name for path in (self.crt_path, self.key_path, self.p12_path)
+            if not path.exists()
+        ]
+        if missing:
+            return f"missing files {'/'.join(missing)}"
         try:
             cert = ssl._ssl._test_decode_cert(os.fspath(self.crt_path))
         except Exception:
-            return False
+            return "unreadable server certificate"
         not_after = str(cert.get("notAfter") or "").strip()
         if not not_after:
-            return False
+            return "server certificate without an expiry date"
         try:
             # Renew before the final week instead of failing unexpectedly in
             # the middle of a restaurant service.
             if ssl.cert_time_to_seconds(not_after) <= time.time() + 7 * 86400:
-                return False
+                return f"server certificate expires {not_after}"
         except (TypeError, ValueError, OverflowError):
-            return False
+            return "unreadable server certificate expiry"
         subject_alt_names = cert.get("subjectAltName", ())
         wanted_host = self.iot_ip.split(":", 1)[0].strip()
         if not wanted_host:
-            return True
+            return None
         for san_type, san_value in subject_alt_names:
             if san_type == "IP Address" and san_value == wanted_host:
-                return True
+                return None
             if san_type == "DNS" and san_value.lower() == wanted_host.lower():
-                return True
-        return False
+                return None
+        covered = ", ".join(str(value) for _type, value in subject_alt_names) or "nothing"
+        return f"the box moved to {wanted_host} but the certificate covers {covered}"
 
 
 def ensure_runtime_tls_assets(

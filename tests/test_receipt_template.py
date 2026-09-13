@@ -866,7 +866,7 @@ class ReceiptTemplateTests(unittest.TestCase):
         self.assertEqual(texts[0], "# {{ tracking_number }}")
         self.assertEqual(texts[1], "{{ chino_order_type || 'DINE IN' }}")
         self.assertEqual(texts[2], "{{ kitchen_title || changes.title || 'NUEVO' }}")
-        self.assertEqual(texts[3], "{{ table_id.table_number }}")
+        self.assertEqual(texts[3], "{{ floor_name }} - T {{ table_id.table_number }}")
         self.assertFalse(any("MESA" in text for text in texts))
         self.assertEqual(product["qty"], "{{ course_groups[].items[].qty }}")
         self.assertEqual(product["name"], "{{ course_groups[].items[].full_product_name }}")
@@ -886,6 +886,20 @@ class ReceiptTemplateTests(unittest.TestCase):
         table_line = next(line for line in lines if "kitchen-table-number" in line.get("classes", []))
         self.assertEqual(table_line.get("text"), "A08")
         self.assertNotIn("MESA", table_line.get("text", ""))
+
+    def test_kitchen_table_is_prefixed_with_floor(self):
+        order = {
+            **SAMPLE_ORDER,
+            "table_id": {
+                "table_number": "109",
+                "floor_id": {"name": "Patio"},
+            },
+        }
+
+        lines = build_kitchen_ticket_lines(order, template=stock_kitchen_template())
+        table_line = next(line for line in lines if "kitchen-table-number" in line.get("classes", []))
+
+        self.assertEqual(table_line.get("text"), "Patio - T 109")
 
     def test_delivery_kitchen_ticket_keeps_table_value_without_mesa_prompt(self):
         order = {

@@ -9,11 +9,10 @@ import os
 import ssl
 import time
 from http.cookies import SimpleCookie
-from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import quote_plus, urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener, urlopen
 
 import websockets
 from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
@@ -26,7 +25,6 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketExce
 # ============================================================
 _CLOUD_EXECUTOR: concurrent.futures.ThreadPoolExecutor | None = None
 _CONFIRM_SEMAPHORE = asyncio.Semaphore(2)  # 最多 2 个确认请求并发
-_PRINT_ACTIONS = frozenset({"print_receipt", "print_receipt_escpos"})
 
 # ------------------------------------------------------------
 # 自定义 opener：禁止 HTTP 重定向跟随。
@@ -360,9 +358,6 @@ class OdooCloudBridge:
                         )
                         for message in messages:
                             msg_id = int(message.get("id") or 0)
-                            if msg_id:
-                                latest_message_id = msg_id
-                                self.config_store.update_last_websocket_message_id(msg_id)
                             message_type = str(message.get("message", {}).get("type") or "unknown") if isinstance(message.get("message"), dict) else "unknown"
                             _logger.debug(
                                 "Cloud bridge processing message id=%s type=%s raw_bytes=%s",
@@ -370,7 +365,9 @@ class OdooCloudBridge:
                                 message_type,
                                 raw_size,
                             )
-                            should_reconnect = await self._handle_message(server_url, message)
+                            should_reconnect = await self._handle_and_commit_message(server_url, message)
+                            if msg_id:
+                                latest_message_id = msg_id
                             if should_reconnect:
                                 raise ReconnectRequested()
                         duration_ms = (asyncio.get_running_loop().time() - raw_started_at) * 1000
@@ -391,6 +388,14 @@ class OdooCloudBridge:
             self._active_ws = None
             self.connected = False
             self.config_store.update_last_websocket_message_id(latest_message_id, force=True)
+
+    async def _handle_and_commit_message(self, server_url: str, message: dict[str, Any]) -> bool:
+        """Handle one message completely before advancing its replay cursor."""
+        should_reconnect = await self._handle_message(server_url, message)
+        message_id = int(message.get("id") or 0)
+        if message_id:
+            self.config_store.update_last_websocket_message_id(message_id)
+        return should_reconnect
 
     async def _ws_keepalive_watchdog(self, ws: Any) -> None:
         """保活监控：定期检查最后一次收到消息的时间。
@@ -516,6 +521,7 @@ class OdooCloudBridge:
             receipt_summary=receipt_summary,
             payload_keys=sorted(action_data.keys()),
         )
+        action_tasks: list[asyncio.Task[None]] = []
         for device_identifier in device_identifiers:
             resolved_device = str(device_identifier)
             task = asyncio.create_task(
@@ -527,6 +533,7 @@ class OdooCloudBridge:
                 )
             )
             self._track_action_task(task)
+            action_tasks.append(task)
         _logger.info(
             "Cloud bridge iot_action scheduled session_id=%s devices=%s action=%s schedule_ms=%.1f pending_tasks=%s",
             session_id,
@@ -535,6 +542,8 @@ class OdooCloudBridge:
             (asyncio.get_running_loop().time() - started_at) * 1000,
             len(self._action_tasks),
         )
+        if action_tasks:
+            await asyncio.gather(*action_tasks)
         return False
 
     def _track_action_task(self, task: asyncio.Task[None]) -> None:
@@ -567,7 +576,6 @@ class OdooCloudBridge:
         started_at = asyncio.get_running_loop().time()
         action = str(action_data.get("action") or "")
         status = "disconnected"
-        print_task: asyncio.Task[bool] | None = None
         _logger.info(
             "Cloud bridge execute start session_id=%s device_identifier=%s action=%s pending_tasks=%s",
             session_id,
@@ -593,35 +601,8 @@ class OdooCloudBridge:
             pending_tasks=len(self._action_tasks),
         )
         try:
-            if action in _PRINT_ACTIONS:
-                # Cloud POS clients wait for this operation confirmation before
-                # they persist the order and notify the other POS devices.  A
-                # physical printer is intentionally serial, so waiting for the
-                # paper to finish makes every later mobile order wait behind
-                # the printer queue.  Accept the job immediately and keep the
-                # actual printing ordered in DeviceManager's per-printer queue.
-                print_task = asyncio.create_task(
-                    self.device_manager.execute(session_id, device_identifier, action_data)
-                )
-                success = True
-                status = "success"
-                _logger.info(
-                    "Cloud bridge print accepted session_id=%s device_identifier=%s action=%s "
-                    "confirmation_before_physical_print=true",
-                    session_id,
-                    device_identifier,
-                    action,
-                )
-                dev_log(
-                    "cloud_bridge_print_accepted",
-                    server_url=server_url,
-                    session_id=session_id,
-                    device_identifier=device_identifier,
-                    action=action,
-                )
-            else:
-                success = await self.device_manager.execute(session_id, device_identifier, action_data)
-                status = "success" if success else "disconnected"
+            success = await self.device_manager.execute(session_id, device_identifier, action_data)
+            status = "success" if success else "disconnected"
             _logger.info(
                 "Cloud bridge execute result session_id=%s device_identifier=%s action=%s success=%s duration_ms=%.1f",
                 session_id,
@@ -711,40 +692,7 @@ class OdooCloudBridge:
                 device_identifier,
                 status,
             )
-        if print_task is not None:
-            try:
-                print_success = await print_task
-                _logger.info(
-                    "Cloud bridge physical print done session_id=%s device_identifier=%s action=%s "
-                    "success=%s total_ms=%.1f",
-                    session_id,
-                    device_identifier,
-                    action,
-                    print_success,
-                    (asyncio.get_running_loop().time() - started_at) * 1000,
-                )
-                dev_log(
-                    "cloud_bridge_physical_print_done",
-                    server_url=server_url,
-                    session_id=session_id,
-                    device_identifier=device_identifier,
-                    action=action,
-                    success=bool(print_success),
-                    duration_ms=round((asyncio.get_running_loop().time() - started_at) * 1000, 1),
-                )
-            except asyncio.CancelledError:
-                print_task.cancel()
-                raise
-            except Exception as exc:
-                _logger.exception(
-                    "Cloud bridge physical print failed after acceptance session_id=%s "
-                    "device_identifier=%s action=%s error_type=%s error=%s",
-                    session_id,
-                    device_identifier,
-                    action,
-                    type(exc).__name__,
-                    str(exc),
-                )
+            raise
         _logger.info(
             "Cloud bridge action done session_id=%s device_identifier=%s action=%s status=%s total_ms=%.1f pending_tasks=%s",
             session_id,
@@ -971,13 +919,19 @@ class OdooCloudBridge:
         if db_name:
             login_url += f"?db={quote_plus(db_name)}"
         req = Request(login_url, method="GET")
-        ssl_context = None if self.verify_ssl else ssl._create_unverified_context()
+        opener = _NO_REDIRECT_OPENER
+        if not self.verify_ssl:
+            opener = build_opener(
+                _NoRedirectHandler(),
+                HTTPSHandler(context=ssl._create_unverified_context()),
+            )
         try:
             # 使用禁止重定向的 opener：Odoo /web/login 返回 302 时，
             # 默认 urlopen 会跟随 → 可能无限循环。
             # 我们直接从 302 响应的 Set-Cookie 中提取 session_id。
-            # OpenerDirector.open() 不支持 context 参数（urlopen 独有）。
-            with _NO_REDIRECT_OPENER.open(req, timeout=10) as resp:
+            # OpenerDirector.open() 不支持 context 参数（urlopen 独有），
+            # so the unverified context must be installed on its HTTPS handler.
+            with opener.open(req, timeout=10) as resp:
                 set_cookies = resp.headers.get_all("Set-Cookie", [])
                 status = resp.status
         except HTTPError as exc:

@@ -5,6 +5,8 @@ import os
 import re
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlencode
+
 _logger = logging.getLogger(__name__)
 
 class ReceiptNormalizationMixin:

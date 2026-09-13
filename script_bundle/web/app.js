@@ -464,9 +464,20 @@ let receiptTemplate = null;
 let selectedReceiptBlockId = null;
 let draggedReceiptBlockId = null;
 let receiptHistory = [];
+let receiptFuture = [];
 let receiptPreviewTimer = null;
 let receiptTemplateMode = "receipt";
 let receiptTemplateDirty = false;
+let printerProfile = null;
+let receiptHasOverflow = false;
+
+const RECEIPT_GROUPS = [
+  ["抬头与订单", ["portal_prompt", "logo", "company", "customer", "table", "invoice", "tracking", "order_info"]],
+  ["商品", ["product_header", "products"]],
+  ["金额与付款", ["promotions", "totals", "payments", "redsys", "coupons", "vouchers", "loyalty"]],
+  ["页脚与营销", ["footer", "delivery", "qr"]],
+  ["自定义", []],
+];
 
 function cloneReceiptTemplate(value) {
   return JSON.parse(JSON.stringify(value));
@@ -573,6 +584,7 @@ function renderKitchenLineSettings() {
 function rememberReceiptTemplate() {
   if (!receiptTemplate) return;
   receiptHistory.push(cloneReceiptTemplate(receiptTemplate));
+  receiptFuture = [];
   if (receiptHistory.length > 30) receiptHistory.shift();
   el("receiptUndo").disabled = receiptHistory.length === 0;
 }
@@ -588,7 +600,21 @@ function receiptProductHeaderBlock() {
 function renderReceiptBlockList() {
   const list = el("receiptBlockList");
   clearNode(list);
-  for (const block of receiptTemplate?.blocks || []) {
+  const query = (el("receiptBlockSearch")?.value || "").trim().toLocaleLowerCase();
+  for (const [groupLabel, ids] of RECEIPT_GROUPS) {
+    const blocks = (receiptTemplate?.blocks || []).filter((block) => {
+      const inGroup = ids.length ? ids.includes(block.id) : block.kind !== "builtin";
+      return inGroup && (!query || block.label.toLocaleLowerCase().includes(query));
+    });
+    if (!blocks.length) continue;
+    const group = document.createElement("details");
+    group.className = "receipt-block-group";
+    group.open = true;
+    const summary = document.createElement("summary");
+    summary.textContent = `${groupLabel} · ${blocks.length}`;
+    const groupList = document.createElement("div");
+    groupList.className = "receipt-block-group-list";
+    for (const block of blocks) {
     const item = document.createElement("article");
     item.className = "receipt-block-item";
     if (!block.enabled) item.classList.add("is-disabled");
@@ -604,6 +630,7 @@ function renderReceiptBlockList() {
     const name = document.createElement("span");
     name.className = "receipt-block-name";
     name.textContent = block.label;
+    name.title = block.label;
 
     const visibility = document.createElement("button");
     visibility.type = "button";
@@ -617,7 +644,21 @@ function renderReceiptBlockList() {
       receiptTemplateChanged();
     });
 
-    item.append(handle, name, visibility);
+    const orderActions = document.createElement("span");
+    orderActions.className = "receipt-order-actions";
+    for (const [label, delta] of [["上移", -1], ["下移", 1]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "receipt-order-action";
+      button.textContent = delta < 0 ? "↑" : "↓";
+      button.title = label;
+      button.setAttribute("aria-label", `${block.label}${label}`);
+      const index = receiptTemplate.blocks.findIndex((entry) => entry.id === block.id);
+      button.disabled = delta < 0 ? index === 0 : index === receiptTemplate.blocks.length - 1;
+      button.addEventListener("click", (event) => { event.stopPropagation(); moveReceiptBlock(block.id, delta); });
+      orderActions.append(button);
+    }
+    item.append(handle, name, orderActions, visibility);
     item.addEventListener("click", () => selectReceiptBlock(block.id));
     item.addEventListener("dragstart", (event) => {
       draggedReceiptBlockId = block.id;
@@ -645,7 +686,10 @@ function renderReceiptBlockList() {
       receiptTemplate.blocks.splice(targetIndex, 0, moved);
       receiptTemplateChanged();
     });
-    list.appendChild(item);
+    groupList.appendChild(item);
+    }
+    group.append(summary, groupList);
+    list.appendChild(group);
   }
 }
 
@@ -803,6 +847,16 @@ function receiptLineText(line, width) {
   return String(line.text || "");
 }
 
+function moveReceiptBlock(blockId, delta) {
+  const index = receiptTemplate.blocks.findIndex((block) => block.id === blockId);
+  const target = index + delta;
+  if (index < 0 || target < 0 || target >= receiptTemplate.blocks.length) return;
+  rememberReceiptTemplate();
+  const [moved] = receiptTemplate.blocks.splice(index, 1);
+  receiptTemplate.blocks.splice(target, 0, moved);
+  receiptTemplateChanged();
+}
+
 function receiptPreviewOptionText(option, fallbackQty = "") {
   if (option && typeof option === "object") {
     const name = String(option.name || option.label || option.display_name || "").trim();
@@ -824,12 +878,31 @@ function receiptPreviewOptionText(option, fallbackQty = "") {
   return `+ ${text}`;
 }
 
-function renderReceiptPreview(lines, width) {
+function renderReceiptDiagnostics(diagnostics) {
+  const problems = (diagnostics || []).filter((item) => item.overflow);
+  receiptHasOverflow = problems.length > 0;
+  el("receiptDiagnosticsSummary").textContent = problems.length
+    ? `${problems.length} 行会被裁切；保存与打印前请修正。`
+    : `检查通过，共 ${(diagnostics || []).length} 行。`;
+  const list = el("receiptDiagnosticsList");
+  clearNode(list);
+  for (const problem of problems.slice(0, 20)) {
+    const item = document.createElement("li");
+    item.textContent = `第 ${problem.line} 行：${problem.used}/${problem.available} 列 · ${problem.text.slice(0, 42)}`;
+    list.append(item);
+  }
+  el("receiptSave").disabled = receiptHasOverflow;
+  el("receiptPrintPreview").disabled = receiptHasOverflow || receiptTemplateMode !== "receipt";
+}
+
+function renderReceiptPreview(lines, width, diagnostics = []) {
   const paper = el("receiptPaper");
   clearNode(paper);
   paper.style.setProperty("--paper-chars", width);
-  el("receiptPreviewWidth").textContent = `${width} 字符`;
-  for (const line of lines || []) {
+  el("receiptRuler").style.setProperty("--paper-chars", width);
+  el("receiptRuler").textContent = Array.from({length: width}, (_, index) => (index + 1) % 10).join("");
+  el("receiptPreviewWidth").textContent = `${width} 列 · ${printerProfile?.printable_width_dots || 576} dots`;
+  for (const [lineIndex, line] of (lines || []).entries()) {
     const row = document.createElement("div");
     row.className = "receipt-preview-line";
     if (line.align === "center") row.classList.add("align-center");
@@ -838,6 +911,7 @@ function renderReceiptPreview(lines, width) {
     if (line.double_width || line.double_height) row.classList.add("is-double");
     if (line.width_multiplier >= 2 || line.height_multiplier >= 2) row.classList.add(`is-size-${Math.max(line.width_multiplier || 1, line.height_multiplier || 1)}`);
     if (line.type === "image") row.classList.add("is-image");
+    if (diagnostics.find((item) => item.line === lineIndex + 1)?.overflow) row.classList.add("is-overflow");
     if (line.type === "image" && line.image_kind === "barcode") {
       row.classList.add("is-barcode");
       const bars = document.createElement("span");
@@ -866,6 +940,7 @@ function renderReceiptPreview(lines, width) {
       paper.appendChild(optionRow);
     }
   }
+  renderReceiptDiagnostics(diagnostics);
 }
 
 async function previewReceiptTemplate() {
@@ -879,20 +954,89 @@ async function previewReceiptTemplate() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(requested),
     });
-    renderReceiptPreview(result.lines, requested.paper_width);
+    printerProfile = result.profile || printerProfile;
+    const width = printerProfile
+      ? Number(printerProfile[printerProfile.font === "b" ? "columns_font_b" : "columns_font_a"])
+      : requested.paper_width;
+    renderReceiptPreview(result.lines, width, result.diagnostics);
     setFeedback("receiptFeedback", "预览已更新。", "success");
   } catch (error) {
     setFeedback("receiptFeedback", error.message || "预览失败", "error");
   }
 }
 
+const PROFILE_FIELDS = {
+  paper_width_mm: "profilePaperWidth", printable_width_dots: "profileDots",
+  columns_font_a: "profileColumnsA", columns_font_b: "profileColumnsB",
+  font: "profileFont", cjk_width: "profileCjkWidth",
+  margin_left_dots: "profileMarginLeft", margin_right_dots: "profileMarginRight",
+  feed_lines: "profileFeedLines", cut: "profileCut",
+};
+
+function profileFromForm() {
+  const profile = {};
+  for (const [key, id] of Object.entries(PROFILE_FIELDS)) {
+    const field = el(id);
+    profile[key] = field.type === "checkbox" ? field.checked : (key === "font" ? field.value : Number(field.value));
+  }
+  return profile;
+}
+
+function fillProfileForm(profile) {
+  printerProfile = profile;
+  for (const [key, id] of Object.entries(PROFILE_FIELDS)) {
+    const field = el(id);
+    if (field.type === "checkbox") field.checked = Boolean(profile[key]);
+    else field.value = String(profile[key]);
+  }
+}
+
+async function loadPrinterProfile() {
+  const result = await getJSON("/api/printer-profile");
+  fillProfileForm(result.profile);
+}
+
+function versionStorageKey() { return `iotbox.receiptVersions.${receiptTemplateMode}`; }
+function receiptVersions() {
+  try { return JSON.parse(localStorage.getItem(versionStorageKey()) || "[]"); }
+  catch { return []; }
+}
+function refreshReceiptVersions() {
+  const select = el("receiptVersions");
+  clearNode(select);
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "历史版本";
+  select.append(placeholder);
+  for (const [index, version] of receiptVersions().entries()) {
+    const option = document.createElement("option");
+    option.value = String(index);
+    option.textContent = new Date(version.savedAt).toLocaleString("zh-CN");
+    select.append(option);
+  }
+}
+function snapshotReceiptVersion() {
+  const versions = [{savedAt: Date.now(), template: cloneReceiptTemplate(receiptTemplate)}, ...receiptVersions()].slice(0, 12);
+  localStorage.setItem(versionStorageKey(), JSON.stringify(versions));
+  refreshReceiptVersions();
+}
+
+function confirmReceiptAction(message) {
+  const dialog = el("receiptConfirmDialog");
+  el("receiptConfirmMessage").textContent = message;
+  dialog.showModal();
+  return new Promise((resolve) => dialog.addEventListener("close", () => resolve(dialog.returnValue === "confirm"), {once: true}));
+}
+
 async function loadReceiptEditor() {
   try {
+    if (!printerProfile) await loadPrinterProfile();
     updateReceiptModeUI();
     const result = await getJSON(receiptTemplateEndpoint());
     receiptTemplate = result.template;
     kitchenLineClasses = result.line_classes || kitchenLineClasses;
     receiptHistory = [];
+    receiptFuture = [];
     el("receiptTemplateName").value = receiptTemplate.name;
     el("receiptPaperWidth").value = String(receiptTemplate.paper_width);
     selectedReceiptBlockId = receiptTemplate.blocks?.[0]?.id || null;
@@ -900,6 +1044,8 @@ async function loadReceiptEditor() {
     renderKitchenLineSettings();
     setReceiptDirty(false);
     el("receiptUndo").disabled = true;
+    el("receiptRedo").disabled = true;
+    refreshReceiptVersions();
     await previewReceiptTemplate();
   } catch (error) {
     setFeedback("receiptFeedback", error.message || "无法加载模板", "error");
@@ -1044,13 +1190,25 @@ el("receiptPaperWidth").addEventListener("change", () => {
 el("receiptUndo").addEventListener("click", () => {
   const previous = receiptHistory.pop();
   if (!previous) return;
+  receiptFuture.push(cloneReceiptTemplate(receiptTemplate));
   receiptTemplate = previous;
   el("receiptTemplateName").value = receiptTemplate.name;
   el("receiptPaperWidth").value = String(receiptTemplate.paper_width);
   receiptTemplateChanged();
   el("receiptUndo").disabled = receiptHistory.length === 0;
+  el("receiptRedo").disabled = receiptFuture.length === 0;
+});
+el("receiptRedo").addEventListener("click", () => {
+  const next = receiptFuture.pop();
+  if (!next) return;
+  receiptHistory.push(cloneReceiptTemplate(receiptTemplate));
+  receiptTemplate = next;
+  el("receiptTemplateName").value = receiptTemplate.name;
+  receiptTemplateChanged();
+  el("receiptRedo").disabled = receiptFuture.length === 0;
 });
 el("receiptSave").addEventListener("click", async () => {
+  if (receiptHasOverflow) return;
   receiptTemplate.name = el("receiptTemplateName").value.trim() || "自定义小票";
   receiptTemplate.paper_width = Number(el("receiptPaperWidth").value) || 48;
   setFeedback("receiptFeedback", "正在保存模板…", "warn");
@@ -1061,6 +1219,7 @@ el("receiptSave").addEventListener("click", async () => {
       body: JSON.stringify(receiptTemplate),
     });
     receiptTemplate = result.template;
+    snapshotReceiptVersion();
     receiptHistory = [];
     el("receiptUndo").disabled = true;
     setReceiptDirty(false);
@@ -1072,7 +1231,7 @@ el("receiptSave").addEventListener("click", async () => {
 });
 el("receiptReset").addEventListener("click", async () => {
   const target = receiptTemplateMode === "kitchen" ? "厨房单" : "顾客小票";
-  if (!window.confirm(`恢复默认${target}布局？当前已保存的模板会被替换。`)) return;
+  if (!await confirmReceiptAction(`恢复默认${target}布局？当前已保存的模板会被替换。`)) return;
   rememberReceiptTemplate();
   try {
     const result = await getJSON(receiptTemplateEndpoint(), { method: "DELETE" });
@@ -1093,7 +1252,7 @@ for (const button of document.querySelectorAll("[data-receipt-mode]")) {
   button.addEventListener("click", async () => {
     const nextMode = button.dataset.receiptMode;
     if (!nextMode || nextMode === receiptTemplateMode) return;
-    if (receiptTemplateDirty && !window.confirm("当前模板有未保存修改，切换后将丢失。继续切换？")) return;
+    if (receiptTemplateDirty && !await confirmReceiptAction("当前模板有未保存修改，切换后将丢失。继续切换？")) return;
     receiptTemplateMode = nextMode;
     receiptTemplate = null;
     selectedReceiptBlockId = null;
@@ -1101,5 +1260,68 @@ for (const button of document.querySelectorAll("[data-receipt-mode]")) {
     await loadReceiptEditor();
   });
 }
+
+el("receiptBlockSearch").addEventListener("input", renderReceiptBlockList);
+el("profileSave").addEventListener("click", async () => {
+  setFeedback("profileFeedback", "正在保存 Profile…", "warn");
+  try {
+    const result = await getJSON("/api/printer-profile", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(profileFromForm())});
+    fillProfileForm(result.profile);
+    setFeedback("profileFeedback", `Profile 已保存，当前 ${result.active_columns} 列。`, "success");
+    await previewReceiptTemplate();
+  } catch (error) { setFeedback("profileFeedback", error.message || "保存失败", "error"); }
+});
+el("profilePreviewCalibration").addEventListener("click", async () => {
+  try {
+    const result = await getJSON("/api/printer-profile/calibration/preview", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(profileFromForm())});
+    fillProfileForm(result.profile);
+    renderReceiptPreview(result.lines, result.profile[result.profile.font === "b" ? "columns_font_b" : "columns_font_a"], result.diagnostics);
+    setFeedback("profileFeedback", "正在预览校准票；未触发打印。", "success");
+  } catch (error) { setFeedback("profileFeedback", error.message || "校准预览失败", "error"); }
+});
+el("profilePrintCalibration").addEventListener("click", async () => {
+  if (!await confirmReceiptAction("将向当前打印机发送一张 RAW ESC/POS 校准票，并可能切纸。继续吗？")) return;
+  try {
+    await getJSON("/api/printer-profile/calibration/print", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(profileFromForm())});
+    setFeedback("profileFeedback", "校准票已提交到打印队列。", "success");
+  } catch (error) { setFeedback("profileFeedback", error.message || "打印失败", "error"); }
+});
+el("receiptPrintPreview").addEventListener("click", async () => {
+  if (receiptHasOverflow || receiptTemplateMode !== "receipt") return;
+  if (!await confirmReceiptAction("将使用当前未保存的布局打印示例小票。继续吗？")) return;
+  try {
+    await getJSON("/api/receipt-template/print-preview", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(receiptTemplate)});
+    setFeedback("receiptFeedback", "当前预览已提交到打印队列。", "success");
+  } catch (error) { setFeedback("receiptFeedback", error.message || "打印失败", "error"); }
+});
+el("receiptExport").addEventListener("click", () => {
+  const blob = new Blob([JSON.stringify(receiptTemplate, null, 2)], {type: "application/json"});
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `${receiptTemplateMode}-template.json`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+});
+el("receiptImport").addEventListener("click", () => el("receiptImportFile").click());
+el("receiptImportFile").addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    rememberReceiptTemplate();
+    receiptTemplate = JSON.parse(await file.text());
+    selectedReceiptBlockId = receiptTemplate.blocks?.[0]?.id || null;
+    receiptTemplateChanged();
+    setFeedback("receiptFeedback", "模板已导入，请检查预览后保存。", "success");
+  } catch { setFeedback("receiptFeedback", "导入失败：文件不是有效模板 JSON。", "error"); }
+  event.target.value = "";
+});
+el("receiptRestoreVersion").addEventListener("click", () => {
+  const version = receiptVersions()[Number(el("receiptVersions").value)];
+  if (!version) return;
+  rememberReceiptTemplate();
+  receiptTemplate = cloneReceiptTemplate(version.template);
+  selectedReceiptBlockId = receiptTemplate.blocks?.[0]?.id || null;
+  receiptTemplateChanged();
+});
 
 loadReceiptEditor();

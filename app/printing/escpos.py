@@ -7,7 +7,7 @@ from time import time
 from typing import Any
 from uuid import uuid4
 
-from .product_options import format_option
+from .product_options import format_option, option_label
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -25,6 +25,9 @@ class EscposEncodingMixin:
         normalize_lines: bool = True,
     ) -> bytes:
         width = self._escpos_line_width()
+        profile = self.local_config_getter().get("printer_profile", {})
+        if not isinstance(profile, dict):
+            profile = {}
         encoding, codepage = self._escpos_encoding_config(payload=payload, lines=lines)
         product_header_rendered = False
         is_kitchen_ticket = self._is_kitchen_ticket_lines(lines)
@@ -34,6 +37,14 @@ class EscposEncodingMixin:
             self._escpos_encoding_init(encoding, codepage, payload),
             b"" if is_kitchen_ticket or is_rendered_receipt_image else self._escpos_line_spacing_command(),
         ]
+        if profile.get("columns_font_a") is not None:
+            chunks.append(b"\x1bM" + (b"\x01" if str(profile.get("font") or "a").lower() == "b" else b"\x00"))
+            try:
+                left_margin = max(0, min(65535, int(profile.get("margin_left_dots") or 0)))
+                print_width = max(1, min(65535, int(profile.get("printable_width_dots") or 576) - left_margin - int(profile.get("margin_right_dots") or 0)))
+            except (TypeError, ValueError):
+                left_margin, print_width = 0, 576
+            chunks.extend((b"\x1dL" + bytes((left_margin & 255, left_margin >> 8)), b"\x1dW" + bytes((print_width & 255, print_width >> 8))))
         rendered_lines_source = self._normalize_receipt_lines(lines) if normalize_lines else lines
         for raw_line in rendered_lines_source:
             if not isinstance(raw_line, dict):
@@ -125,7 +136,8 @@ class EscposEncodingMixin:
         if not is_rendered_receipt_image:
             chunks.append(b"\n")
         default_feed_lines = "1" if is_rendered_receipt_image else ("4" if is_kitchen_ticket else "10")
-        feed_lines = max(0, int(os.getenv("IOT_ESCPOS_FEED_LINES", default_feed_lines)))
+        configured_feed = profile.get("feed_lines") if profile.get("columns_font_a") is not None else None
+        feed_lines = max(0, int(configured_feed if configured_feed is not None else os.getenv("IOT_ESCPOS_FEED_LINES", default_feed_lines)))
         chunks.append(b"\n" * feed_lines)
         if cut:
             # With a tight line spacing, line feeds alone may leave too
@@ -178,11 +190,13 @@ class EscposEncodingMixin:
                 qty = str(raw_line.get("qty") or "").strip()
                 name = str(raw_line.get("name") or "").strip()
                 total = str(raw_line.get("total") or "").strip()
+                # Kitchen attributes print by name only; see
+                # ``option_label`` for why a price must never reach them.
                 combo_items = [
-                    str(item).strip()
+                    option_label(item, fallback_qty=qty)
                     for item in (raw_line.get("combo_items") or [])
-                    if str(item).strip()
                 ]
+                combo_items = [item for item in combo_items if item]
                 if not qty or not name:
                     continue
                 line_text = f"{qty} x {name}"
@@ -190,7 +204,7 @@ class EscposEncodingMixin:
                     line_text += f"  {total}"
                 text_lines.append(line_text)
                 for combo in combo_items:
-                    text_lines.append(f"  + {combo}")
+                    text_lines.append(f"    + {combo}")
                 continue
 
             if line_type == "header_meta_line":
@@ -208,15 +222,19 @@ class EscposEncodingMixin:
             if line_type in {"service_info_block", "product_header"}:
                 continue
 
-            text = str(raw_line.get("text") or "").strip()
-            if not text:
-                continue
-
             classes = (
                 [str(cls) for cls in raw_line.get("classes") or []]
                 if isinstance(raw_line.get("classes"), list)
                 else []
             )
+            raw_text = str(raw_line.get("text") or "")
+            text = (
+                "    " + raw_text.lstrip().rstrip()
+                if "kitchen-attribute" in classes
+                else raw_text.strip()
+            )
+            if not text.strip():
+                continue
 
             if self._is_separator_line(text) and "invoice-asterisk-border" not in classes:
                 text_lines.append("-" * width)
@@ -308,12 +326,17 @@ class EscposEncodingMixin:
         """Build a native Odoo kitchen ticket through the visual template."""
         changes = order_data.get("changes") if isinstance(order_data.get("changes"), dict) else {}
         table_number = str(order_data.get("table_number") or order_data.get("table_name") or "").strip()
+        floor_name = str(order_data.get("floor_name") or "").strip()
         normalized = {
             **order_data,
             "kitchen": True,
             "kitchen_title": str(changes.get("title") or order_data.get("title") or "NUEVO"),
             "course_groups": changes.get("groupedData") or [],
-            "table_id": {"table_number": table_number} if table_number else {},
+            "floor_name": floor_name,
+            "table_id": {
+                "table_number": table_number,
+                "floor_id": {"name": floor_name} if floor_name else {},
+            } if table_number else {},
             "config": {"name": str(order_data.get("config_name") or "")},
             "date_order": str(order_data.get("time") or order_data.get("date_order") or ""),
         }
@@ -370,11 +393,15 @@ class EscposEncodingMixin:
                 qty = str(raw_line.get("qty") or "").strip()
                 name = str(raw_line.get("name") or "").strip()
                 total = str(raw_line.get("total") or "").strip()
+                # Attributes are listed by name only: the kitchen must not show
+                # what an attribute costs, and a structured option carries its
+                # price in ``unit_price``, which ``str()`` used to print as a
+                # Python dict repr.
                 combo_items = [
-                    str(item).strip()
+                    option_label(item, fallback_qty=qty)
                     for item in (raw_line.get("combo_items") or [])
-                    if str(item).strip()
                 ]
+                combo_items = [item for item in combo_items if item]
                 if not qty or not name:
                     continue
                 line_text = f"{qty} x {name}"
@@ -396,7 +423,7 @@ class EscposEncodingMixin:
                 for combo in combo_items:
                     chunks.append(self._escpos_align("left"))
                     chunks.append(
-                        self._escpos_safe_text(f"  - {combo}", encoding).encode(encoding, errors="replace")
+                        self._escpos_safe_text(f"    + {combo}", encoding).encode(encoding, errors="replace")
                     )
                     chunks.append(b"\n")
                 continue
@@ -446,15 +473,19 @@ class EscposEncodingMixin:
             if line_type == "product_header":
                 continue
 
-            text = str(raw_line.get("text") or "").strip()
-            if not text:
-                continue
-
             classes = (
                 [str(cls) for cls in raw_line.get("classes") or []]
                 if isinstance(raw_line.get("classes"), list)
                 else []
             )
+            raw_text = str(raw_line.get("text") or "")
+            text = (
+                "    " + raw_text.lstrip().rstrip()
+                if "kitchen-attribute" in classes
+                else raw_text.strip()
+            )
+            if not text.strip():
+                continue
 
             if self._is_separator_line(text) and "invoice-asterisk-border" not in classes:
                 chunks.append(self._escpos_align("left"))

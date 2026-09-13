@@ -43,6 +43,17 @@ class TextLayoutMixin:
                     break
                 rendered += char
             return [rendered]
+        if "kitchen-attribute" in classes:
+            # Attribute indentation is intentional layout, not whitespace to
+            # normalize. Keep exactly the four leading spaces produced by the
+            # kitchen receipt builder.
+            text = str(line.get("text") or "").rstrip("\r\n")
+            rendered = ""
+            for char in text:
+                if self._text_width(rendered + char) > effective_width:
+                    break
+                rendered += char
+            return [rendered] if rendered.strip() else []
         text = str(line.get("text") or "").strip()
         if not text and {"receipt-spacer", "customer-spacer", "product-section-spacer", "payment-terminal-spacer"}.intersection(classes):
             return [""]
@@ -364,6 +375,14 @@ class TextLayoutMixin:
         return len(set(compact)) == 1 and compact[0] in {"-", "=", "_", "*"}
 
     def _escpos_line_width(self) -> int:
+        profile = self.local_config_getter().get("printer_profile", {})
+        if isinstance(profile, dict) and profile.get(key := (
+            "columns_font_b" if str(profile.get("font") or "a").lower() == "b" else "columns_font_a"
+        )) is not None:
+            try:
+                return max(24, min(96, int(profile.get(key) or 0)))
+            except (TypeError, ValueError):
+                pass
         configured = os.getenv("IOT_ESCPOS_LINE_WIDTH", "").strip()
         if configured.isdigit():
             return max(24, int(configured))
