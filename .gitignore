@@ -39,3 +39,9 @@ script_bundle/spool/
 # PowerShell 意外生成的空文件
 
 *.broken
+
+# Redsys payment terminal: the live signing key and the transaction store are
+# per-installation state, like certs/ and spool/.  config.example.yaml ships
+# instead and is copied to config.yaml by the installer.
+/redsys/config.yaml
+/redsys/data/

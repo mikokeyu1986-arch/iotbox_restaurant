@@ -286,12 +286,20 @@ class ReceiptMetadataMixin:
         config_path = root_dir / "instances" / "dev" / "config" / "odoo.conf"
         if not query_python.exists() or not config_path.exists():
             return None
+        # The credentials are deliberately not in this file: it is published, and
+        # a developer database password does not belong in a public repository.
+        # Set IOT_DEV_DB_PASSWORD to enable this lookup.
+        dev_password = os.getenv("IOT_DEV_DB_PASSWORD", "").strip()
+        if not dev_password:
+            return None
 
         query_script = """
 import json
+import os
 import psycopg2
 import sys
-conn = psycopg2.connect(host='localhost', port=5432, dbname='odoo19_dev', user='odoo', password='odoo')
+conn = psycopg2.connect(host='localhost', port=5432, dbname='odoo19_dev', user='odoo',
+                        password=os.environ['IOT_DEV_DB_PASSWORD'])
 cur = conn.cursor()
 cur.execute(
     '''

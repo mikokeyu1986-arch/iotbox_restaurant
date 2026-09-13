@@ -25,7 +25,10 @@ SetupIconFile=..\assets\iotbox-icon.ico
 Source: "..\dist\gui_app\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 Source: "..\dist\run_https\*"; DestDir: "{app}\runtime"; Flags: recursesubdirs ignoreversion
 Source: "..\dist\redsys_service\*"; DestDir: "{app}\runtime\redsys_service"; Flags: recursesubdirs ignoreversion
-Source: "..\redsys\config.yaml"; DestDir: "{app}\redsys"; Flags: onlyifdoesntexist ignoreversion
+; The Redsys credentials are per installation, so the packed template is copied
+; to config.yaml on first install and never overwritten after that -- the same
+; arrangement as runtime_config.example.json below.
+Source: "..\redsys\config.example.yaml"; DestDir: "{app}\redsys"; DestName: "config.yaml"; Flags: onlyifdoesntexist ignoreversion
 ; REDSYS resolves these paths relative to config.yaml.  Keep the vendor
 ; runtime separate from the PyInstaller service runtime above.
 Source: "..\redsys\server\redsys_server\bridge\*"; DestDir: "{app}\redsys\server\redsys_server\bridge"; Flags: recursesubdirs ignoreversion
